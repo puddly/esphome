@@ -89,6 +89,11 @@ def _final_validate(config: ConfigType) -> ConfigType:
             raise cv.Invalid(
                 f"{CONF_PORT_TYPE} is set automatically for USB serial ports"
             )
+        for key in (CONF_RTS_PIN, CONF_DTR_PIN):
+            if key in config:
+                raise cv.Invalid(
+                    f"{key} is not used on USB serial ports; the USB bridge drives the modem lines"
+                )
     elif CONF_PORT_TYPE not in config:
         raise cv.Invalid(f"{CONF_PORT_TYPE} is required")
     return config

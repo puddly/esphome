@@ -331,6 +331,13 @@ SerialProxyResult SerialProxy::set_modem_pins(api::APIConnection *api_connection
   const bool dtr = (line_states & SERIAL_PROXY_LINE_STATE_FLAG_DTR) != 0;
   ESP_LOGV(TAG, "Setting modem pins [%" PRIu32 "]: RTS=%s, DTR=%s", this->instance_index_, ONOFF(rts), ONOFF(dtr));
 
+#ifdef USE_SERIAL_PROXY_USB_INFO
+  if (this->usb_channel_ != nullptr) {
+    // Goes out as a control transfer later; OK means accepted, as with writes
+    this->usb_channel_->set_modem_control(dtr, rts);
+    return SerialProxyResult::SERIAL_PROXY_RESULT_OK;
+  }
+#endif
   if (this->rts_pin_ != nullptr) {
     this->rts_state_ = rts;
     this->rts_pin_->digital_write(rts);
@@ -392,8 +399,16 @@ void SerialProxy::get_usb_info(usb_host::UsbDeviceInfo &info, api::SerialProxyUs
 #endif
 
 uint32_t SerialProxy::get_modem_pins() const {
-  return (this->rts_state_ ? static_cast<uint32_t>(SERIAL_PROXY_LINE_STATE_FLAG_RTS) : 0u) |
-         (this->dtr_state_ ? static_cast<uint32_t>(SERIAL_PROXY_LINE_STATE_FLAG_DTR) : 0u);
+  bool rts = this->rts_state_;
+  bool dtr = this->dtr_state_;
+#ifdef USE_SERIAL_PROXY_USB_INFO
+  if (this->usb_channel_ != nullptr) {
+    rts = this->usb_channel_->get_rts();
+    dtr = this->usb_channel_->get_dtr();
+  }
+#endif
+  return (rts ? static_cast<uint32_t>(SERIAL_PROXY_LINE_STATE_FLAG_RTS) : 0u) |
+         (dtr ? static_cast<uint32_t>(SERIAL_PROXY_LINE_STATE_FLAG_DTR) : 0u);
 }
 
 SerialProxyResult SerialProxy::flush_port(api::APIConnection *api_connection) {

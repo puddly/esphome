@@ -153,8 +153,14 @@ class SerialProxy final : public uart::UARTDevice, public Component {
   /// Get current modem pin states as a bitmask of SerialProxyLineStateFlag values
   uint32_t get_modem_pins() const;
 
-  /// Get the modem pins this instance can drive as a bitmask of SerialProxyLineStateFlag values
+  /// Get the modem pins this instance can drive as a bitmask of SerialProxyLineStateFlag values.
+  /// A USB port drives them through the bridge, so both are always offered there.
   uint32_t get_configured_modem_pins() const {
+#ifdef USE_SERIAL_PROXY_USB_INFO
+    if (this->usb_channel_ != nullptr) {
+      return SERIAL_PROXY_LINE_STATE_FLAG_RTS | SERIAL_PROXY_LINE_STATE_FLAG_DTR;
+    }
+#endif
     return (this->rts_pin_ != nullptr ? static_cast<uint32_t>(SERIAL_PROXY_LINE_STATE_FLAG_RTS) : 0u) |
            (this->dtr_pin_ != nullptr ? static_cast<uint32_t>(SERIAL_PROXY_LINE_STATE_FLAG_DTR) : 0u);
   }
@@ -271,11 +277,11 @@ class SerialProxy final : public uart::UARTDevice, public Component {
   api::enums::SerialProxyMode mode_{};
 #endif
 
-  /// Optional GPIO pins for modem control
+  /// Optional GPIO pins for modem control; unused on USB ports
   GPIOPin *rts_pin_{nullptr};
   GPIOPin *dtr_pin_{nullptr};
 
-  /// Current modem pin states
+  /// Current GPIO modem pin states; a USB port asks the bridge instead
   bool rts_state_{false};
   bool dtr_state_{false};
 
