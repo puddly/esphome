@@ -356,6 +356,30 @@ class USBUartTypePL2303 : public USBUartTypeCdcAcm {
   Pl2303ChipType chip_type_{PL2303_TYPE_UNKNOWN};
 };
 
+#ifdef USB_UART_SLOT_COUNT
+/// One row of the driver table: a CDC ACM device with these IDs
+struct USBUartDispatchRule {
+  uint16_t vid;
+  uint16_t pid;
+};
+
+/// Binds newly enumerated USB devices to a pool of slots the way udev binds a driver: the
+/// rules are walked in order, the first that matches wins, and the device lands in the
+/// lowest free slot. A slot keeps its index for the life of the firmware, so a device that
+/// returns after a replug may land in a different one. The line settings come from the
+/// client that opens the port, so a rule carries none.
+class USBUartDispatcher final : public usb_host::USBDeviceMatcher {
+ public:
+  void add_rule(const USBUartDispatchRule &rule) { this->rules_.push_back(rule); }
+  void add_slot(USBUartTypeCdcAcm *slot) { this->slots_.push_back(slot); }
+  usb_host::USBClient *match(const usb_device_desc_t &desc, const usb_device_info_t &info) override;
+
+ protected:
+  StaticVector<USBUartDispatchRule, USB_UART_DISPATCH_RULE_COUNT> rules_;
+  StaticVector<USBUartTypeCdcAcm *, USB_UART_SLOT_COUNT> slots_;
+};
+#endif
+
 }  // namespace esphome::usb_uart
 
 #endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3 ||

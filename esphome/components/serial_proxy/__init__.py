@@ -16,8 +16,9 @@ from dataclasses import dataclass
 
 from esphome import pins
 import esphome.codegen as cg
-from esphome.components import uart
+from esphome.components import uart, usb_uart
 from esphome.components.const import CONF_MANUFACTURER
+from esphome.components.usb_host import CONF_DRIVERS, CONF_USB_HOST_ID, USBHost
 from esphome.components.usb_uart import is_usb_uart_channel
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_IDENTITY, CONF_NAME, CONF_UART_ID
@@ -27,7 +28,7 @@ import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 CODEOWNERS = ["@kbx81"]
-DEPENDENCIES = ["api", "uart"]
+DEPENDENCIES = ["api"]
 
 MULTI_CONF = True
 
@@ -64,6 +65,12 @@ def _get_data() -> SerialProxyData:
     return CORE.data[DOMAIN]
 
 
+def AUTO_LOAD(config: list[ConfigType]) -> list[str]:
+    if any(CONF_USB_HOST_ID in entry for entry in config):
+        return ["uart", "usb_uart"]
+    return ["uart"]
+
+
 # What the port claims to be, for a device that has no descriptors of its own to read.
 # Each value may be a lambda, run once in setup(), for identifiers that differ per unit.
 IDENTITY_SCHEMA = cv.All(
@@ -77,24 +84,56 @@ IDENTITY_SCHEMA = cv.All(
     cv.has_at_least_one_key(CONF_MANUFACTURER, CONF_PRODUCT, CONF_SERIAL_NUMBER),
 )
 
-CONFIG_SCHEMA = (
-    cv.Schema(
-        {
-            cv.GenerateID(): cv.declare_id(SerialProxy),
-            cv.Required(CONF_NAME): cv.string_strict,
-            cv.Required(CONF_PORT_TYPE): cv.enum(SERIAL_PROXY_PORT_TYPES, upper=True),
-            cv.Optional(CONF_RTS_PIN): pins.gpio_output_pin_schema,
-            cv.Optional(CONF_DTR_PIN): pins.gpio_output_pin_schema,
-            cv.Optional(CONF_IDENTITY): IDENTITY_SCHEMA,
-        }
-    )
-    .extend(cv.COMPONENT_SCHEMA)
-    .extend(uart.UART_DEVICE_SCHEMA)
-)
+BASE_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(SerialProxy),
+        cv.Required(CONF_NAME): cv.string_strict,
+    }
+).extend(cv.COMPONENT_SCHEMA)
+
+# A port on a UART the configuration names
+UART_SCHEMA = BASE_SCHEMA.extend(
+    {
+        cv.Required(CONF_PORT_TYPE): cv.enum(SERIAL_PROXY_PORT_TYPES, upper=True),
+        cv.Optional(CONF_RTS_PIN): pins.gpio_output_pin_schema,
+        cv.Optional(CONF_DTR_PIN): pins.gpio_output_pin_schema,
+        cv.Optional(CONF_IDENTITY): IDENTITY_SCHEMA,
+    }
+).extend(uart.UART_DEVICE_SCHEMA)
+
+# A slot of the USB host's dispatcher: whichever device the driver table sends here. The
+# slot index, and so the proxy's place among the host's ports, is the entry's position among
+# the entries naming the same host.
+USB_SCHEMA = BASE_SCHEMA.extend(
+    {
+        cv.Required(CONF_USB_HOST_ID): cv.use_id(USBHost),
+        cv.Optional(CONF_PORT_TYPE, default="USB_SERIAL"): cv.one_of(
+            "USB_SERIAL", upper=True
+        ),
+    }
+).extend(usb_uart.DISPATCH_SLOT_SCHEMA)
+
+
+def _validate(config: ConfigType) -> ConfigType:
+    if CONF_USB_HOST_ID in config:
+        return USB_SCHEMA(config)
+    return UART_SCHEMA(config)
+
+
+CONFIG_SCHEMA = _validate
 
 
 def _final_validate(config: ConfigType) -> ConfigType:
-    is_usb = is_usb_uart_channel(config[CONF_UART_ID], fv.full_config.get())
+    full_config = fv.full_config.get()
+    if (host_id := config.get(CONF_USB_HOST_ID)) is not None:
+        host_config = full_config["usb_host"]
+        if host_config[CONF_ID] == host_id and not host_config[CONF_DRIVERS]:
+            raise cv.Invalid(
+                f"{CONF_USB_HOST_ID} needs at least one entry in usb_host {CONF_DRIVERS}, "
+                "or no device will ever reach this port"
+            )
+        return config
+    is_usb = is_usb_uart_channel(config[CONF_UART_ID], full_config)
     if config[CONF_PORT_TYPE] == "USB_SERIAL" and not is_usb:
         raise cv.Invalid(
             f"{CONF_PORT_TYPE} USB_SERIAL requires {CONF_UART_ID} to be a usb_uart channel"
@@ -120,14 +159,21 @@ async def _add_serial_proxy_count_define() -> None:
 async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
-    await uart.register_uart_device(var, config)
     cg.add(cg.App.register_serial_proxy(var))
     cg.add(var.set_name(config[CONF_NAME]))
-    cg.add(var.set_port_type(config[CONF_PORT_TYPE]))
-    if is_usb_uart_channel(config[CONF_UART_ID], CORE.config):
-        channel = await cg.get_variable(config[CONF_UART_ID])
+    if (host_id := config.get(CONF_USB_HOST_ID)) is not None:
+        channel = await usb_uart.new_dispatch_slot(host_id, config)
+        cg.add(var.set_uart_parent(channel))
+        cg.add(var.set_port_type(SERIAL_PROXY_PORT_TYPES[config[CONF_PORT_TYPE]]))
         cg.add(var.set_usb_channel(channel))
         cg.add_define("USE_SERIAL_PROXY_USB_IDENTITY")
+    else:
+        await uart.register_uart_device(var, config)
+        cg.add(var.set_port_type(config[CONF_PORT_TYPE]))
+        if is_usb_uart_channel(config[CONF_UART_ID], CORE.config):
+            channel = await cg.get_variable(config[CONF_UART_ID])
+            cg.add(var.set_usb_channel(channel))
+            cg.add_define("USE_SERIAL_PROXY_USB_IDENTITY")
     if (identity := config.get(CONF_IDENTITY)) is not None:
         cg.add_define("USE_SERIAL_PROXY_CONFIGURED_IDENTITY")
         for key, setter in (

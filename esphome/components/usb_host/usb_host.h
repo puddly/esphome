@@ -38,12 +38,20 @@ namespace esphome::usb_host {
 // - USB task can immediately restart input transfers and release slots without context switching
 // - Main loop controls backpressure by deciding when to restart after consuming data
 // The atomic bitmask ensures thread-safe allocation/deallocation without mutex blocking.
+//
+// DEVICE DISPATCH:
+// The host owns the one USB host library client and the one USB task. Every newly enumerated
+// device is opened once, by the host, and offered to the registered matchers in registration
+// order; the first matcher to accept names the USBClient that takes the device. A device
+// nobody accepts is closed again. USBClients therefore never compete for a device, and the
+// order of the matchers is the driver precedence.
 
 static const char *const TAG = "usb_host";
 
 // Forward declarations
 struct TransferRequest;
 class USBClient;
+class USBHost;
 
 // constants for setup packet type
 static constexpr uint8_t USB_RECIP_DEVICE = 0;
@@ -87,8 +95,6 @@ struct TransferStatus {
 
 using transfer_cb_t = std::function<void(const TransferStatus &)>;
 
-class USBClient;
-
 // struct used to capture all data needed for a transfer
 struct TransferRequest {
   usb_transfer_t *transfer;
@@ -117,8 +123,6 @@ struct UsbEvent {
   void release() {}
 };
 
-// callback function type.
-
 // USB string descriptors hold at most 126 characters; one more for the terminator
 static constexpr size_t DESC_STRING_BUF_SIZE = 128;
 
@@ -138,25 +142,36 @@ struct UsbDeviceInfo {
 /// UTF-16 to UTF-8 conversion is not currently implemented.
 bool copy_descriptor_string(const usb_str_desc_t *desc, std::span<char, DESC_STRING_BUF_SIZE> buffer);
 
+/// Render a USB string descriptor for logging, using buffer as scratch. A missing or
+/// non-ASCII descriptor renders as a placeholder instead
+const char *get_descriptor_string(const usb_str_desc_t *desc, std::span<char, DESC_STRING_BUF_SIZE> buffer);
+
+/// Decides whether a newly enumerated device is taken, and by which client. The host asks
+/// every registered matcher in turn, from the main loop, and stops at the first that answers.
+class USBDeviceMatcher {
+ public:
+  /// Return the client that takes this device, or nullptr to pass on it. The device is open
+  /// and its descriptors are cached, so a matcher may inspect any of them; the string
+  /// pointers in info are valid only for the duration of the call.
+  virtual USBClient *match(const usb_device_desc_t &desc, const usb_device_info_t &info) = 0;
+};
+
 enum ClientState {
   USB_CLIENT_INIT = 0,
-  USB_CLIENT_OPEN,
-  USB_CLIENT_CLOSE,
-  USB_CLIENT_GET_DESC,
-  USB_CLIENT_GET_INFO,
   USB_CLIENT_CONNECTED,
 };
-class USBClient : public Component {
+
+/// Drives one USB device at a time. A static client, configured with a VID and PID, is also
+/// its own matcher and takes any free device with those IDs; a client used as a dispatcher
+/// slot is never registered as a matcher and only ever receives a device from its dispatcher.
+class USBClient : public Component, public USBDeviceMatcher {
   friend class USBHost;
 
  public:
   USBClient(uint16_t vid, uint16_t pid) : trq_in_use_(0), vid_(vid), pid_(pid) {}
   void setup() override;
-  void loop() override;
   // setup must happen after the host bus has been setup
   float get_setup_priority() const override { return setup_priority::IO; }
-  void on_opened(uint8_t addr);
-  void on_removed(usb_device_handle_t handle);
   bool transfer_in(uint8_t ep_address, const transfer_cb_t &callback, uint16_t length);
   bool transfer_out(uint8_t ep_address, const transfer_cb_t &callback, const uint8_t *data, uint16_t length);
   void dump_config() override;
@@ -164,6 +179,9 @@ class USBClient : public Component {
   trq_bitmask_t get_trq_in_use() const { return trq_in_use_; }
   bool control_transfer(uint8_t type, uint8_t request, uint16_t value, uint16_t index, const transfer_cb_t &callback,
                         const std::vector<uint8_t> &data = {});
+
+  /// Takes a free device whose VID and PID are the configured ones; zero for both means any
+  USBClient *match(const usb_device_desc_t &desc, const usb_device_info_t &info) override;
 
   /// Whether a device has been opened and its setup by the subclass has finished
   bool is_connected() const { return this->state_ == USB_CLIENT_CONNECTED; }
@@ -182,20 +200,10 @@ class USBClient : public Component {
     this->connection_callback_.add(std::forward<F>(callback));
   }
 
-  // Lock-free event queue and pool for USB task to main loop communication
-  // Must be public for access from static callbacks
-  LockFreeQueue<UsbEvent, USB_EVENT_QUEUE_SIZE> event_queue;
-  // Pool sized to queue capacity (SIZE-1) because LockFreeQueue<T,N> is a ring
-  // buffer that holds N-1 elements. This guarantees allocate() returns nullptr
-  // before push() can fail, preventing a pool slot leak.
-  EventPool<UsbEvent, USB_EVENT_QUEUE_SIZE - 1> event_pool;
-
  protected:
-  // Process USB events from the queue. Returns true if any work was done.
-  // Subclasses should call this instead of USBClient::loop() to combine
-  // with their own work check for a single disable_loop() decision.
-  bool process_usb_events_();
-  void handle_open_state_();
+  /// Take ownership of a device the host has opened. Runs the subclass setup; a subclass
+  /// that rejects the device calls disconnect(), which closes it. Main loop only.
+  void attach_(usb_device_handle_t device_handle);
   TransferRequest *get_trq_();  // Lock-free allocation using atomic bitmask (multi-consumer safe)
   virtual void disconnect();
   virtual void on_connected() {}
@@ -211,16 +219,12 @@ class USBClient : public Component {
     this->trq_in_use_.store(0);
   }
 
-  // USB task management
-  static void usb_task_fn(void *arg);
-  [[noreturn]] void usb_task_loop_() const;
-
   // Members ordered to minimize struct padding on 32-bit platforms
   TransferRequest requests_[MAX_REQUESTS]{};
-  TaskHandle_t usb_task_handle_{nullptr};
+  USBHost *host_{nullptr};
+  /// The host's client handle, cached at setup so every transfer and claim goes through it
   usb_host_client_handle_t handle_{};
   usb_device_handle_t device_handle_{};
-  int device_addr_{-1};
   int state_{USB_CLIENT_INIT};
   // Lock-free pool management using atomic bitmask (no dynamic allocation)
   // Bit i = 1: requests_[i] is in use, Bit i = 0: requests_[i] is available
@@ -233,14 +237,53 @@ class USBClient : public Component {
   // only ever reported for a device that was reported connected
   bool connection_reported_{false};
 };
+
 class USBHost final : public Component {
  public:
   float get_setup_priority() const override { return setup_priority::BUS; }
   void loop() override;
   void setup() override;
 
+#ifdef USB_HOST_CLIENT_COUNT
+  /// Every client on this host, matched or not, so a removed device finds its owner
+  void register_client(USBClient *client) {
+    client->host_ = this;
+    this->clients_.push_back(client);
+  }
+#endif
+#ifdef USB_HOST_MATCHER_COUNT
+  /// Matchers are asked in registration order, so this order is the driver precedence
+  void register_matcher(USBDeviceMatcher *matcher) { this->matchers_.push_back(matcher); }
+#endif
+
+  usb_host_client_handle_t get_client_handle() const { return this->handle_; }
+
+  // Lock-free event queue and pool for USB task to main loop communication
+  // Must be public for access from static callbacks
+  LockFreeQueue<UsbEvent, USB_EVENT_QUEUE_SIZE> event_queue;
+  // Pool sized to queue capacity (SIZE-1) because LockFreeQueue<T,N> is a ring
+  // buffer that holds N-1 elements. This guarantees allocate() returns nullptr
+  // before push() can fail, preventing a pool slot leak.
+  EventPool<UsbEvent, USB_EVENT_QUEUE_SIZE - 1> event_pool;
+
  protected:
-  std::vector<USBClient *> clients_{};
+  /// Open a newly enumerated device and hand it to the first matcher that takes it
+  void on_device_new_(uint8_t address);
+  /// Tell the client driving this device that it is gone
+  void on_device_gone_(usb_device_handle_t device_handle);
+
+  // USB task management
+  static void usb_task_fn(void *arg);
+  [[noreturn]] void usb_task_loop_() const;
+
+#ifdef USB_HOST_CLIENT_COUNT
+  StaticVector<USBClient *, USB_HOST_CLIENT_COUNT> clients_;
+#endif
+#ifdef USB_HOST_MATCHER_COUNT
+  StaticVector<USBDeviceMatcher *, USB_HOST_MATCHER_COUNT> matchers_;
+#endif
+  usb_host_client_handle_t handle_{};
+  TaskHandle_t usb_task_handle_{nullptr};
 };
 
 }  // namespace esphome::usb_host

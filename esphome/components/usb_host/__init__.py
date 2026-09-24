@@ -11,7 +11,7 @@ from esphome.components.esp32 import (
     only_on_variant,
 )
 import esphome.config_validation as cv
-from esphome.const import CONF_DEVICES, CONF_ID
+from esphome.const import CONF_DEVICES, CONF_ID, CONF_TYPE
 from esphome.core import CORE
 from esphome.cpp_generator import MockObj
 from esphome.cpp_types import Component
@@ -29,6 +29,11 @@ CONF_PID = "pid"
 CONF_ENABLE_HUBS = "enable_hubs"
 CONF_MAX_TRANSFER_REQUESTS = "max_transfer_requests"
 CONF_MAX_PACKET_SIZE = "max_packet_size"
+CONF_USB_HOST_ID = "usb_host_id"
+CONF_DRIVERS = "drivers"
+
+_request_client_slot = cg.slot_counter("USB_HOST_CLIENT_COUNT")
+_request_matcher_slot = cg.slot_counter("USB_HOST_MATCHER_COUNT")
 
 
 def usb_device_schema(
@@ -37,6 +42,7 @@ def usb_device_schema(
     schema = cv.COMPONENT_SCHEMA.extend(
         {
             cv.GenerateID(): cv.declare_id(cls),
+            cv.GenerateID(CONF_USB_HOST_ID): cv.use_id(USBHost),
         }
     )
     if vid:
@@ -61,6 +67,19 @@ def get_max_packet_size() -> int:
     return CORE.data.get(DOMAIN, {}).get(CONF_MAX_PACKET_SIZE, 64)
 
 
+# The drivers a rule can name. Only CDC ACM exists so far; a vendor driver adds a value here.
+DRIVER_TYPES = ("CDC_ACM",)
+
+# One row of the driver table: the driver to run for a device with these IDs. Rules are tried
+# in order and the first match wins. The line settings come from the client that opens the port.
+DRIVER_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_TYPE): cv.one_of(*DRIVER_TYPES, upper=True),
+        cv.Required(CONF_VID): cv.hex_uint16_t,
+        cv.Required(CONF_PID): cv.hex_uint16_t,
+    }
+)
+
 CONFIG_SCHEMA = cv.All(
     cv.COMPONENT_SCHEMA.extend(
         {
@@ -73,6 +92,7 @@ CONFIG_SCHEMA = cv.All(
                 64, 128, 256, 512, 1024, int=True
             ),
             cv.Optional(CONF_DEVICES): cv.ensure_list(usb_device_schema()),
+            cv.Optional(CONF_DRIVERS, default=[]): cv.ensure_list(DRIVER_SCHEMA),
         }
     ),
     only_on_variant(
@@ -88,9 +108,24 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
+def register_client(host: MockObj, client: MockObj) -> None:
+    """Attach a USBClient to its host, matched or not, so a removed device finds it."""
+    _request_client_slot()
+    cg.add(host.register_client(client))
+
+
+def register_matcher(host: MockObj, matcher: MockObj) -> None:
+    """Add a matcher to the host's dispatch order; call in the order rules should be tried."""
+    _request_matcher_slot()
+    cg.add(host.register_matcher(matcher))
+
+
 async def register_usb_client(config: ConfigType) -> MockObj:
     var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID])
     await cg.register_component(var, config)
+    host = await cg.get_variable(config[CONF_USB_HOST_ID])
+    register_client(host, var)
+    register_matcher(host, var)
     return var
 
 

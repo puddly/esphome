@@ -211,8 +211,7 @@ bool USBUartChannelBase::read_array(uint8_t *data, size_t len) {
 }
 void USBUartComponent::setup() { USBClient::setup(); }
 void USBUartComponent::loop() {
-  bool had_work = this->process_usb_events_();
-  had_work |= this->run_config_machine_();
+  bool had_work = this->run_config_machine_();
 
   // Process USB data from the lock-free queue
   UsbDataChunk *chunk;
@@ -675,6 +674,28 @@ void USBUartChannelBase::load_settings(bool /*dump_config*/) {
   // The per-channel control transfers already log their values at debug level.
   this->parent_->apply_channel_settings(this);
 }
+
+#ifdef USB_UART_SLOT_COUNT
+usb_host::USBClient *USBUartDispatcher::match(const usb_device_desc_t &desc, const usb_device_info_t & /*info*/) {
+  bool matched = false;
+  for (const auto &rule : this->rules_) {
+    if (desc.idVendor == rule.vid && desc.idProduct == rule.pid) {
+      matched = true;
+      break;
+    }
+  }
+  if (!matched) {
+    return nullptr;
+  }
+  for (auto *slot : this->slots_) {
+    if (!slot->is_connected()) {
+      return slot;
+    }
+  }
+  ESP_LOGW(TAG, "Device %04X:%04X matched a driver but every slot is in use", desc.idVendor, desc.idProduct);
+  return nullptr;
+}
+#endif
 
 }  // namespace esphome::usb_uart
 

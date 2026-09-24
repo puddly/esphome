@@ -1,8 +1,14 @@
+from dataclasses import dataclass
+
 import esphome.codegen as cg
+from esphome.components import usb_host
 from esphome.components.const import CONF_DATA_BITS, CONF_PARITY, CONF_STOP_BITS
 from esphome.components.esp32 import VARIANT_ESP32P4, get_esp32_variant
 from esphome.components.uart import CONF_DEBUG_PREFIX, CONF_FLUSH_TIMEOUT, UARTComponent
 from esphome.components.usb_host import (
+    CONF_DRIVERS,
+    CONF_PID,
+    CONF_VID,
     get_max_packet_size,
     register_usb_client,
     usb_device_schema,
@@ -15,17 +21,104 @@ from esphome.const import (
     CONF_DEBUG,
     CONF_DUMMY_RECEIVER,
     CONF_ID,
+    CONF_UART_ID,
 )
-from esphome.core import CORE, ID
+from esphome.core import CORE, ID, coroutine_with_priority
+from esphome.coroutine import CoroPriority
+from esphome.cpp_generator import MockObj
 from esphome.cpp_types import Component
 from esphome.types import ConfigType
 
 AUTO_LOAD = ["uart", "usb_host", "bytebuffer"]
 CODEOWNERS = ["@clydebarrow"]
 
+DOMAIN = "usb_uart"
+
 usb_uart_ns = cg.esphome_ns.namespace("usb_uart")
 USBUartComponent = usb_uart_ns.class_("USBUartComponent", Component)
 USBUartChannel = usb_uart_ns.class_("USBUartChannel", UARTComponent)
+USBUartTypeCdcAcm = usb_uart_ns.class_("USBUartTypeCdcAcm", USBUartComponent)
+USBUartDispatcher = usb_uart_ns.class_("USBUartDispatcher")
+USBUartDispatchRule = usb_uart_ns.struct("USBUartDispatchRule")
+
+
+@dataclass
+class UsbUartData:
+    max_buffer_size: int = 0
+    dispatcher: MockObj | None = None
+
+
+def _get_data() -> UsbUartData:
+    if DOMAIN not in CORE.data:
+        CORE.data[DOMAIN] = UsbUartData()
+        CORE.add_job(_finalize)
+    return CORE.data[DOMAIN]
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _finalize() -> None:
+    data = _get_data()
+    # The output chunk pool/queue are compile-time-sized templates shared by all
+    # USBUartChannelBase instances, so use the largest buffer_size across every channel
+    # of every device and slot. Add one extra slot because LockFreeQueue<T,N> is a ring
+    # buffer that wastes one entry.
+    output_chunk_count = max(data.max_buffer_size // get_max_packet_size(), 2) + 1
+    cg.add_define("USB_UART_OUTPUT_CHUNK_COUNT", output_chunk_count)
+    if data.dispatcher is None:
+        return
+    drivers = CORE.config[usb_host.DOMAIN][CONF_DRIVERS]
+    cg.add_define("USB_UART_DISPATCH_RULE_COUNT", len(drivers))
+    for rule in drivers:
+        cg.add(
+            data.dispatcher.add_rule(
+                cg.StructInitializer(
+                    USBUartDispatchRule,
+                    (CONF_VID, rule[CONF_VID]),
+                    (CONF_PID, rule[CONF_PID]),
+                )
+            )
+        )
+
+
+def _note_buffer_size(buffer_size: int) -> None:
+    data = _get_data()
+    data.max_buffer_size = max(data.max_buffer_size, buffer_size)
+
+
+_request_slot = cg.slot_counter("USB_UART_SLOT_COUNT")
+
+CONF_SLOT_ID = "slot_id"
+
+# Keys a consumer adds to its own schema for one slot of the host's dispatcher pool
+DISPATCH_SLOT_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(CONF_SLOT_ID): cv.declare_id(USBUartTypeCdcAcm),
+        cv.GenerateID(CONF_UART_ID): cv.declare_id(USBUartChannel),
+        cv.Optional(CONF_BUFFER_SIZE, default=256): cv.int_range(min=64, max=8192),
+    }
+)
+
+
+async def new_dispatch_slot(host_id: ID, config: ConfigType) -> MockObj:
+    """Add one slot to the host's dispatcher pool and return the slot's UART channel."""
+    data = _get_data()
+    host = await cg.get_variable(host_id)
+    if data.dispatcher is None:
+        data.dispatcher = cg.new_Pvariable(
+            ID("usb_uart_dispatcher", is_declaration=True, type=USBUartDispatcher)
+        )
+        usb_host.register_matcher(host, data.dispatcher)
+    slot = cg.new_Pvariable(config[CONF_SLOT_ID], 0, 0)
+    await cg.register_component(slot, {})
+    usb_host.register_client(host, slot)
+    buffer_size = config[CONF_BUFFER_SIZE]
+    channel = cg.new_Pvariable(config[CONF_UART_ID], 0, buffer_size)
+    await cg.register_parented(channel, slot)
+    cg.add(slot.add_channel(channel))
+    _request_slot()
+    cg.add(data.dispatcher.add_slot(slot))
+    _note_buffer_size(buffer_size)
+    return channel
 
 
 def is_usb_uart_channel(uart_id: ID, full_config: ConfigType) -> bool:
@@ -207,24 +300,14 @@ CONFIG_SCHEMA = cv.ensure_list(
 
 
 async def to_code(config: list[ConfigType]) -> None:
-    # The output chunk pool/queue are compile-time-sized templates shared by all
-    # USBUartChannel instances, so use the largest buffer_size across every channel
-    # of every device. Add one extra slot because LockFreeQueue<T,N> is a ring
-    # buffer that wastes one entry.
-    max_buffer_size = max(
-        channel[CONF_BUFFER_SIZE]
-        for device in config
-        for channel in device[CONF_CHANNELS]
-    )
-    output_chunk_count = max(max_buffer_size // get_max_packet_size(), 2) + 1
-    cg.add_define("USB_UART_OUTPUT_CHUNK_COUNT", output_chunk_count)
-
+    # Auto-loaded for the dispatcher's slots, this runs with no devices of its own
     for device in config:
         var = await register_usb_client(device)
         # The C++ default is true; only emit the override
         if not device.get(CONF_CLAIM_COMM_INTERFACE, True):
             cg.add(var.set_claim_comm_interface(False))
         for index, channel in enumerate(device[CONF_CHANNELS]):
+            _note_buffer_size(channel[CONF_BUFFER_SIZE])
             chvar = cg.new_Pvariable(channel[CONF_ID], index, channel[CONF_BUFFER_SIZE])
             await cg.register_parented(chvar, var)
             cg.add(chvar.set_stop_bits(channel[CONF_STOP_BITS]))

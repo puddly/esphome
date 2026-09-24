@@ -165,7 +165,7 @@ bool copy_descriptor_string(const usb_str_desc_t *desc, std::span<char, DESC_STR
   return true;
 }
 
-static const char *get_descriptor_string(const usb_str_desc_t *desc, std::span<char, DESC_STRING_BUF_SIZE> buffer) {
+const char *get_descriptor_string(const usb_str_desc_t *desc, std::span<char, DESC_STRING_BUF_SIZE> buffer) {
   if (desc == nullptr || desc->bLength < 2)
     return "(unspecified)";
   if (!copy_descriptor_string(desc, buffer))
@@ -203,56 +203,10 @@ bool USBClient::get_device_info(UsbDeviceInfo &info) const {
   return true;
 }
 
-// CALLBACK CONTEXT: USB task (called from usb_host_client_handle_events in USB task)
-static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *ptr) {
-  auto *client = static_cast<USBClient *>(ptr);
-
-  // Allocate event from pool
-  UsbEvent *event = client->event_pool.allocate();
-  if (event == nullptr) {
-    // No events available - increment counter for periodic logging
-    client->event_queue.increment_dropped_count();
-    return;
-  }
-
-  // Queue events to be processed in main loop
-  switch (event_msg->event) {
-    case USB_HOST_CLIENT_EVENT_NEW_DEV: {
-      ESP_LOGD(TAG, "New device %d", event_msg->new_dev.address);
-      event->type = EVENT_DEVICE_NEW;
-      event->data.device_new.address = event_msg->new_dev.address;
-      break;
-    }
-    case USB_HOST_CLIENT_EVENT_DEV_GONE: {
-      ESP_LOGD(TAG, "Device gone");
-      event->type = EVENT_DEVICE_GONE;
-      event->data.device_gone.handle = event_msg->dev_gone.dev_hdl;
-      break;
-    }
-    default:
-      ESP_LOGD(TAG, "Unknown event %d", event_msg->event);
-      client->event_pool.release(event);
-      return;
-  }
-
-  // Push always succeeds: pool is sized to queue capacity (SIZE-1), so if
-  // allocate() returned non-null, the queue cannot be full.
-  client->event_queue.push(event);
-
-  // Re-enable component loop to process the queued event
-  client->enable_loop_soon_any_context();
-
-  // Wake main loop immediately to process USB event
-  App.wake_loop_threadsafe();
-}
 void USBClient::setup() {
-  usb_host_client_config_t config{.is_synchronous = false,
-                                  .max_num_event_msg = 5,
-                                  .async = {.client_event_callback = client_event_cb, .callback_arg = this}};
-  auto err = usb_host_client_register(&config, &this->handle_);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "client register failed: %s", esp_err_to_name(err));
-    this->status_set_error(LOG_STR("Client register failed"));
+  this->handle_ = this->host_->get_client_handle();
+  if (this->handle_ == nullptr) {
+    this->status_set_error(LOG_STR("USB host not available"));
     this->mark_failed();
     return;
   }
@@ -262,118 +216,27 @@ void USBClient::setup() {
     usb_host_transfer_alloc(USB_MAX_PACKET_SIZE, 0, &request.transfer);
     request.client = this;  // Set once, never changes
   }
-
-  // Create and start USB task
-  xTaskCreate(usb_task_fn, "usb_task",
-              USB_TASK_STACK_SIZE,  // Stack size
-              this,                 // Task parameter
-              USB_TASK_PRIORITY,    // Priority (higher than main loop)
-              &this->usb_task_handle_);
-
-  if (this->usb_task_handle_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to create USB task");
-    this->mark_failed();
-  }
 }
 
-void USBClient::usb_task_fn(void *arg) {
-  auto *client = static_cast<USBClient *>(arg);
-  client->usb_task_loop_();
-}
-void USBClient::usb_task_loop_() const {
-  while (true) {
-    usb_host_client_handle_events(this->handle_, portMAX_DELAY);
+USBClient *USBClient::match(const usb_device_desc_t &desc, const usb_device_info_t & /*info*/) {
+  if (this->state_ != USB_CLIENT_INIT) {
+    return nullptr;
   }
-}
-
-bool USBClient::process_usb_events_() {
-  bool had_work = false;
-
-  // Process any events from the USB task
-  UsbEvent *event;
-  while ((event = this->event_queue.pop()) != nullptr) {
-    had_work = true;
-    switch (event->type) {
-      case EVENT_DEVICE_NEW:
-        this->on_opened(event->data.device_new.address);
-        break;
-      case EVENT_DEVICE_GONE:
-        this->on_removed(event->data.device_gone.handle);
-        break;
-    }
-    // Return event to pool for reuse
-    this->event_pool.release(event);
+  if ((this->vid_ != 0 || this->pid_ != 0) && (desc.idVendor != this->vid_ || desc.idProduct != this->pid_)) {
+    return nullptr;
   }
-
-  // Log dropped events periodically
-  uint16_t dropped = this->event_queue.get_and_reset_dropped_count();
-  if (dropped > 0) {
-    ESP_LOGW(TAG, "Dropped %u USB events due to queue overflow", dropped);
-  }
-
-  if (this->state_ == USB_CLIENT_OPEN) {
-    had_work = true;
-    this->handle_open_state_();
-  }
-
-  return had_work;
+  return this;
 }
 
-void USBClient::loop() {
-  if (!this->process_usb_events_()) {
-    this->disable_loop();
-  }
-}
-
-void USBClient::handle_open_state_() {
-  int err;
-  ESP_LOGD(TAG, "Open device %d", this->device_addr_);
-  err = usb_host_device_open(this->handle_, this->device_addr_, &this->device_handle_);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Device open failed: %s", esp_err_to_name(err));
-    this->state_ = USB_CLIENT_INIT;
-    return;
-  }
-  ESP_LOGD(TAG, "Get descriptor device %d", this->device_addr_);
-  const usb_device_desc_t *desc;
-  err = usb_host_get_device_descriptor(this->device_handle_, &desc);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Device get_desc failed: %s", esp_err_to_name(err));
-    this->disconnect();
-    return;
-  }
-  ESP_LOGD(TAG, "Device descriptor: vid %X pid %X", desc->idVendor, desc->idProduct);
-  if (desc->idVendor != this->vid_ || desc->idProduct != this->pid_) {
-    if (this->vid_ != 0 || this->pid_ != 0) {
-      ESP_LOGD(TAG, "Not our device, closing");
-      this->disconnect();
-      return;
-    }
-  }
-  usb_device_info_t dev_info;
-  err = usb_host_device_info(this->device_handle_, &dev_info);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Device info failed: %s", esp_err_to_name(err));
-    this->disconnect();
-    return;
-  }
+void USBClient::attach_(usb_device_handle_t device_handle) {
+  this->device_handle_ = device_handle;
   this->state_ = USB_CLIENT_CONNECTED;
-  char buf_manuf[DESC_STRING_BUF_SIZE];
-  char buf_product[DESC_STRING_BUF_SIZE];
-  char buf_serial[DESC_STRING_BUF_SIZE];
-  ESP_LOGD(TAG, "Device connected: Manuf: %s; Prod: %s; Serial: %s",
-           get_descriptor_string(dev_info.str_desc_manufacturer, buf_manuf),
-           get_descriptor_string(dev_info.str_desc_product, buf_product),
-           get_descriptor_string(dev_info.str_desc_serial_num, buf_serial));
-
 #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
   const usb_device_desc_t *device_desc;
-  err = usb_host_get_device_descriptor(this->device_handle_, &device_desc);
-  if (err == ESP_OK)
+  if (usb_host_get_device_descriptor(this->device_handle_, &device_desc) == ESP_OK)
     usb_client_print_device_descriptor(device_desc);
   const usb_config_desc_t *config_desc;
-  err = usb_host_get_active_config_descriptor(this->device_handle_, &config_desc);
-  if (err == ESP_OK)
+  if (usb_host_get_active_config_descriptor(this->device_handle_, &config_desc) == ESP_OK)
     usb_client_print_config_descriptor(config_desc, nullptr);
 #endif
   this->on_connected();
@@ -389,18 +252,6 @@ void USBClient::report_connected_() {
   }
   this->connection_reported_ = true;
   this->connection_callback_.call(true);
-}
-
-void USBClient::on_opened(uint8_t addr) {
-  if (this->state_ == USB_CLIENT_INIT) {
-    this->device_addr_ = addr;
-    this->state_ = USB_CLIENT_OPEN;
-  }
-}
-void USBClient::on_removed(usb_device_handle_t handle) {
-  if (this->device_handle_ == handle) {
-    this->disconnect();
-  }
 }
 
 // CALLBACK CONTEXT: USB task (called from usb_host_client_handle_events in USB task)
@@ -459,8 +310,8 @@ TransferRequest *USBClient::get_trq_() {
 }
 
 void USBClient::disconnect() {
-  // Also reached for a device this client opened and then declined, or lost before it was
-  // ready; neither was reported as connected, so neither is reported as removed
+  // Also reached for a device this client was handed and then declined, or lost before it
+  // was ready; neither was reported as connected, so neither is reported as removed
   const bool was_reported = this->connection_reported_;
   this->connection_reported_ = false;
   this->on_disconnected();
@@ -470,7 +321,6 @@ void USBClient::disconnect() {
   }
   this->state_ = USB_CLIENT_INIT;
   this->device_handle_ = nullptr;
-  this->device_addr_ = -1;
   if (was_reported) {
     this->connection_callback_.call(false);
   }
@@ -612,6 +462,10 @@ bool USBClient::transfer_out(uint8_t ep_address, const transfer_cb_t &callback, 
   return true;
 }
 void USBClient::dump_config() {
+  if (this->vid_ == 0 && this->pid_ == 0) {
+    ESP_LOGCONFIG(TAG, "USBClient\n  Device: any");
+    return;
+  }
   ESP_LOGCONFIG(TAG,
                 "USBClient\n"
                 "  Vendor id %04X\n"

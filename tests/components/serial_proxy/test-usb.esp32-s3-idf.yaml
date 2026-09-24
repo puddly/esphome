@@ -1,4 +1,4 @@
-# A hardware UART port alongside the USB one, so the USB identity define is exercised on a
+# A hardware UART port alongside the USB ones, so the USB identity define is exercised on a
 # port that has no USB channel, and both identity sources are compiled into one build
 packages:
   uart: !include ../../test_build_components/common/uart/esp32-idf.yaml
@@ -10,11 +10,20 @@ wifi:
 api:
 
 usb_host:
+  id: host
+  enable_hubs: true
+  drivers:
+    - type: cdc_acm
+      vid: 0x303A
+      pid: 0x831A
+    - type: cdc_acm
+      vid: 0x303A
+      pid: 0x4001
 
 usb_uart:
   - type: CDC_ACM
-    vid: 0x303A
-    pid: 0x831A
+    vid: 0x1234
+    pid: 0x5678
     channels:
       - id: usb_serial_channel
         baud_rate: 460800
@@ -24,6 +33,13 @@ serial_proxy:
     uart_id: usb_serial_channel
     name: USB Serial Port
     port_type: USB_SERIAL
+  - id: serial_proxy_slot_0
+    usb_host_id: host
+    name: USB 0
+  - id: serial_proxy_slot_1
+    usb_host_id: host
+    name: USB 1
+    buffer_size: 1024
   - id: serial_proxy_hw
     uart_id: uart_bus
     name: Hardware Serial Port
