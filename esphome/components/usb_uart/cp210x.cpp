@@ -118,6 +118,13 @@ bool CP210XDriver::config_step(USBUartComponent *uart, USBUartChannelBase *chann
       uart->config_transfer_(USB_VENDOR_IFC | usb_host::USB_DIR_OUT, SET_BAUDRATE, 0, channel->index_, baud.get_data());
       return true;
     }
+    case 3:
+      // Assert DTR+RTS (init only): a radio using hardware flow control only sends while RTS is asserted
+      if (reload)
+        return false;
+      // Low byte sets DTR (bit 0) and RTS (bit 1), high byte masks which of the two to change
+      uart->config_transfer_(USB_VENDOR_IFC | usb_host::USB_DIR_OUT, SET_MHS, 0x0303, channel->index_);
+      return true;
     default:
       return false;
   }
