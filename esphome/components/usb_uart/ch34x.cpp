@@ -50,11 +50,11 @@ static const CH34xEntry CH34X_TABLE[] = {
     {"CH346C_M2", 0x55EC, 1, 0xFF, 0xFF, CHIP_CH346C_M2, 2},
 };
 
-bool USBUartTypeCH34X::config_device_step(uint8_t step, bool ok, const uint8_t *response) {
+bool CH34XDriver::config_device_step(USBUartComponent *uart, uint8_t step, bool ok, const uint8_t *response) {
   if (step == 0) {
     // Vendor-specific GET_CHIP_VERSION request (bRequest=0x5F): returns chip ID bytes
     // used to distinguish CH34x variants sharing the same PID.
-    this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_IN, 0x5F, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0});
+    uart->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_IN, 0x5F, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0});
     return true;
   }
   // step 1: parse the chip-version response (falling back to "unknown" on failure).
@@ -62,10 +62,16 @@ bool USBUartTypeCH34X::config_device_step(uint8_t step, bool ok, const uint8_t *
     ESP_LOGE(TAG, "CH34x chip detection failed");
     return false;
   }
+  // The device's own PID: a dispatcher slot is configured with none
+  const usb_device_desc_t *device_desc;
+  if (usb_host_get_device_descriptor(uart->device_handle_, &device_desc) != ESP_OK) {
+    ESP_LOGE(TAG, "get_device_descriptor failed");
+    return false;
+  }
   CH34xChipType chiptype = CHIP_UNKNOWN;
   uint8_t num_ports = 1;
   for (const auto &e : CH34X_TABLE) {
-    if (e.pid != this->pid_)
+    if (e.pid != device_desc->idProduct)
       continue;
     if (e.match != 0xFF && (response[e.byte_idx] & e.mask) != e.match)
       continue;
@@ -83,20 +89,19 @@ bool USBUartTypeCH34X::config_device_step(uint8_t step, bool ok, const uint8_t *
       break;
     }
   }
-  this->chiptype_ = chiptype;
-  this->chip_name_ = name;
-  this->num_ports_ = num_ports;
-  ESP_LOGD(TAG, "CH34x chip: %s, ports: %u", name, this->num_ports_);
+  this->chiptype = chiptype;
+  this->chip_name = name;
+  this->num_ports = num_ports;
+  ESP_LOGD(TAG, "CH34x chip: %s, ports: %u", name, this->num_ports);
   return false;
 }
 
 void USBUartTypeCH34X::dump_config() {
   USBUartTypeCdcAcm::dump_config();
-  ESP_LOGCONFIG(TAG, "  CH34x chip: %s", this->chip_name_);
+  ESP_LOGCONFIG(TAG, "  CH34x chip: %s", this->driver_.chip_name);
 }
 
-bool USBUartTypeCH34X::config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok,
-                                   const uint8_t *response) {
+bool CH34XDriver::config_step(USBUartComponent *uart, USBUartChannelBase *channel, uint8_t step) {
   uint8_t cmd = 0xA1 + channel->index_;
   if (channel->index_ >= 2)
     cmd += 0xE;
@@ -144,19 +149,19 @@ bool USBUartTypeCH34X::config_step(USBUartChannelBase *channel, uint8_t step, bo
       value |= channel->data_bits_ - 5;
       value <<= 8;
       value |= 0x8C;
-      this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, cmd, value, (factor << 8) | divisor);
+      uart->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, cmd, value, (factor << 8) | divisor);
       return true;
     }
     case 1:
-      this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, cmd + 3, 0x80, 0);
+      uart->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, cmd + 3, 0x80, 0);
       return true;
     default:
       return false;
   }
 }
 
-std::vector<CdcEps> USBUartTypeCH34X::parse_descriptors(usb_device_handle_t dev_hdl) {
-  auto result = USBUartTypeCdcAcm::parse_descriptors(dev_hdl);
+std::vector<CdcEps> CH34XDriver::parse_descriptors(usb_device_handle_t dev_hdl) {
+  auto result = parse_cdc_acm_descriptors(dev_hdl);
   // ch34x doesn't use the interrupt endpoint, and we don't have endpoints to spare
   for (auto &cdc_dev : result) {
     cdc_dev.interrupt_interface_number = 0xFF;

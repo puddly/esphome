@@ -21,6 +21,7 @@ from esphome.const import (
     CONF_DEBUG,
     CONF_DUMMY_RECEIVER,
     CONF_ID,
+    CONF_TYPE,
     CONF_UART_ID,
 )
 from esphome.core import CORE, ID, coroutine_with_priority
@@ -38,8 +39,17 @@ usb_uart_ns = cg.esphome_ns.namespace("usb_uart")
 USBUartComponent = usb_uart_ns.class_("USBUartComponent", Component)
 USBUartChannel = usb_uart_ns.class_("USBUartChannel", UARTComponent)
 USBUartTypeCdcAcm = usb_uart_ns.class_("USBUartTypeCdcAcm", USBUartComponent)
+USBUartDispatchSlot = usb_uart_ns.class_("USBUartDispatchSlot", USBUartTypeCdcAcm)
 USBUartDispatcher = usb_uart_ns.class_("USBUartDispatcher")
 USBUartDispatchRule = usb_uart_ns.struct("USBUartDispatchRule")
+USBUartDriverType = usb_uart_ns.enum("USBUartDriverType")
+USB_UART_DRIVER_TYPES = {
+    "CDC_ACM": USBUartDriverType.USB_UART_DRIVER_TYPE_CDC_ACM,
+    "CP210X": USBUartDriverType.USB_UART_DRIVER_TYPE_CP210X,
+    "CH34X": USBUartDriverType.USB_UART_DRIVER_TYPE_CH34X,
+    "FT23XX": USBUartDriverType.USB_UART_DRIVER_TYPE_FT23XX,
+    "PL2303": USBUartDriverType.USB_UART_DRIVER_TYPE_PL2303,
+}
 
 
 @dataclass
@@ -68,6 +78,9 @@ async def _finalize() -> None:
         return
     drivers = CORE.config[usb_host.DOMAIN][CONF_DRIVERS]
     cg.add_define("USB_UART_DISPATCH_RULE_COUNT", len(drivers))
+    # Only the drivers a rule names are compiled into the slots
+    for driver in sorted({rule[CONF_TYPE] for rule in drivers}):
+        cg.add_define(f"USE_USB_UART_DRIVER_{driver}")
     for rule in drivers:
         cg.add(
             data.dispatcher.add_rule(
@@ -75,6 +88,7 @@ async def _finalize() -> None:
                     USBUartDispatchRule,
                     (CONF_VID, rule[CONF_VID]),
                     (CONF_PID, rule[CONF_PID]),
+                    ("driver", USB_UART_DRIVER_TYPES[rule[CONF_TYPE]]),
                 )
             )
         )
@@ -92,7 +106,7 @@ CONF_SLOT_ID = "slot_id"
 # Keys a consumer adds to its own schema for one slot of the host's dispatcher pool
 DISPATCH_SLOT_SCHEMA = cv.Schema(
     {
-        cv.GenerateID(CONF_SLOT_ID): cv.declare_id(USBUartTypeCdcAcm),
+        cv.GenerateID(CONF_SLOT_ID): cv.declare_id(USBUartDispatchSlot),
         cv.GenerateID(CONF_UART_ID): cv.declare_id(USBUartChannel),
         cv.Optional(CONF_BUFFER_SIZE, default=256): cv.int_range(min=64, max=8192),
     }
@@ -108,7 +122,7 @@ async def new_dispatch_slot(host_id: ID, config: ConfigType) -> MockObj:
             ID("usb_uart_dispatcher", is_declaration=True, type=USBUartDispatcher)
         )
         usb_host.register_matcher(host, data.dispatcher)
-    slot = cg.new_Pvariable(config[CONF_SLOT_ID], 0, 0)
+    slot = cg.new_Pvariable(config[CONF_SLOT_ID])
     await cg.register_component(slot, {})
     usb_host.register_client(host, slot)
     buffer_size = config[CONF_BUFFER_SIZE]

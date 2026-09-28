@@ -220,7 +220,7 @@ static optional<CdcEps> get_uart(const usb_config_desc_t *config_desc, uint8_t i
   return eps;
 }
 
-std::vector<CdcEps> USBUartTypeFT23XX::parse_descriptors(usb_device_handle_t dev_hdl) {
+std::vector<CdcEps> FT23XXDriver::parse_descriptors(USBUartComponent *uart, usb_device_handle_t dev_hdl) {
   const usb_config_desc_t *config_desc;
   const usb_device_desc_t *device_desc;
   std::vector<CdcEps> cdc_devs{};
@@ -235,33 +235,33 @@ std::vector<CdcEps> USBUartTypeFT23XX::parse_descriptors(usb_device_handle_t dev
     return {};
   }
   if (device_desc->bcdDevice == 0x400 || (device_desc->bcdDevice == 0x200 && device_desc->iSerialNumber == 0)) {
-    this->chip_type_ = TYPE_BM;
+    this->chip_type = TYPE_BM;
     type_string = "BM type chip";
   } else if (device_desc->bcdDevice == 0x200) {
-    this->chip_type_ = TYPE_AM;
+    this->chip_type = TYPE_AM;
     type_string = "AM type chip";
   } else if (device_desc->bcdDevice == 0x500) {
-    this->chip_type_ = TYPE_2232C;
+    this->chip_type = TYPE_2232C;
     type_string = "2232C chip";
   } else if (device_desc->bcdDevice == 0x600) {
-    this->chip_type_ = TYPE_R;
+    this->chip_type = TYPE_R;
     type_string = "type R chip";
   } else if (device_desc->bcdDevice == 0x700) {
-    this->chip_type_ = TYPE_2232H;
+    this->chip_type = TYPE_2232H;
     type_string = "2232H chip";
   } else if (device_desc->bcdDevice == 0x800) {
-    this->chip_type_ = TYPE_4232H;
+    this->chip_type = TYPE_4232H;
     type_string = "4232H chip";
   } else if (device_desc->bcdDevice == 0x900) {
-    this->chip_type_ = TYPE_232H;
+    this->chip_type = TYPE_232H;
     type_string = "232H type chip";
   } else if (device_desc->bcdDevice == 0x1000) {
-    this->chip_type_ = TYPE_230X;
+    this->chip_type = TYPE_230X;
     type_string = "230x chip";
   }
 
   ESP_LOGD(TAG, "Found FTDI %s based device", type_string.c_str());
-  for (size_t intf_idx = 0; intf_idx < this->channels_.size(); intf_idx++) {
+  for (size_t intf_idx = 0; intf_idx < uart->channels_.size(); intf_idx++) {
     if (auto eps = get_uart(config_desc, static_cast<uint8_t>(intf_idx))) {
       cdc_devs.push_back(*eps);
       ESP_LOGD(TAG, "Found CDC interface at USB interface index %zu", intf_idx);
@@ -270,7 +270,7 @@ std::vector<CdcEps> USBUartTypeFT23XX::parse_descriptors(usb_device_handle_t dev
   return cdc_devs;
 }
 
-void USBUartTypeFT23XX::start_input(USBUartChannelBase *channel) {
+void FT23XXDriver::start_input(USBUartComponent *uart, USBUartChannelBase *channel) {
   if (!channel->initialised_.load())
     return;
 
@@ -283,7 +283,7 @@ void USBUartTypeFT23XX::start_input(USBUartChannelBase *channel) {
 
   const auto *ep = channel->cdc_dev_.in_ep;
 
-  auto callback = [this, channel](const usb_host::TransferStatus &status) {
+  auto callback = [uart, channel](const usb_host::TransferStatus &status) {
     if (!status.success) {
       ESP_LOGE(TAG, "RX Transfer failed, status=%s", esp_err_to_name(status.error_code));
       channel->input_started_.store(false);
@@ -296,13 +296,13 @@ void USBUartTypeFT23XX::start_input(USBUartChannelBase *channel) {
     if (uart_data_len > 0) {
       ESP_LOGV(TAG, "RX callback: Received %zu bytes, channel=%d", uart_data_len, channel->index_);
       if (!channel->dummy_receiver_) {
-        UsbDataChunk *chunk = this->chunk_pool_.allocate();
+        UsbDataChunk *chunk = uart->chunk_pool_.allocate();
         if (chunk == nullptr) {
-          this->usb_data_queue_.increment_dropped_count();
+          uart->usb_data_queue_.increment_dropped_count();
           channel->input_started_.store(false);
           // Queue is full — wake the main loop to drain it, then let read_array()
           // retrigger start_input() rather than spinning here in the USB task.
-          this->enable_loop_soon_any_context();
+          uart->enable_loop_soon_any_context();
           App.wake_loop_threadsafe();
           return;
         }
@@ -310,7 +310,7 @@ void USBUartTypeFT23XX::start_input(USBUartChannelBase *channel) {
         memcpy(chunk->data, status.data + 2, uart_data_len);
         chunk->length = static_cast<uint16_t>(uart_data_len);
         chunk->channel = channel;
-        this->usb_data_queue_.push(chunk);
+        uart->usb_data_queue_.push(chunk);
 #ifdef USE_UART_DEBUGGER
         if (channel->debug_) {
           uart::UARTDebug::log_hex(uart::UART_DIRECTION_RX,
@@ -318,7 +318,7 @@ void USBUartTypeFT23XX::start_input(USBUartChannelBase *channel) {
                                    channel->debug_prefix_);
         }
 #endif
-        this->enable_loop_soon_any_context();
+        uart->enable_loop_soon_any_context();
         App.wake_loop_threadsafe();
       }
     } else if (status.data_len >= 2) {
@@ -327,37 +327,36 @@ void USBUartTypeFT23XX::start_input(USBUartChannelBase *channel) {
     }
 
     channel->input_started_.store(false);
-    this->start_input(channel);
+    uart->start_input(channel);
   };
 
-  if (!this->transfer_in(ep->bEndpointAddress, callback, ep->wMaxPacketSize)) {
+  if (!uart->transfer_in(ep->bEndpointAddress, callback, ep->wMaxPacketSize)) {
     ESP_LOGE(TAG, "RX transfer submission failed for ep=0x%02X", ep->bEndpointAddress);
     channel->input_started_.store(false);
   }
 }
 
-void USBUartTypeFT23XX::on_rx_overflow(USBUartChannelBase *channel) {
+void FT23XXDriver::on_rx_overflow(USBUartChannelBase *channel) {
   ESP_LOGW(TAG, "RX buffer overflow on channel %d, clearing to resync", channel->index_);
   channel->input_buffer_.clear();
 }
 
-bool USBUartTypeFT23XX::config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok,
-                                    const uint8_t *response) {
+bool FT23XXDriver::config_step(USBUartComponent *uart, USBUartChannelBase *channel, uint8_t step, bool reload) const {
   // On reload (settings change on an open channel) skip the SIO reset; the FTDI set_termios
   // path only re-applies baud + line properties and does not re-assert DTR/RTS.
   if (reload)
     step++;
   switch (step) {
     case 0:  // SIO reset (init only)
-      this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x00, 0x00,
+      uart->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x00, 0x00,
                              channel->cdc_dev_.bulk_interface_number + 1);
       return true;
     case 1: {  // set baudrate
-      auto config = ftdi_convert_baudrate(channel->baud_rate_, this->chip_type_, channel->index_);
+      auto config = ftdi_convert_baudrate(channel->baud_rate_, this->chip_type, channel->index_);
       uint16_t usb_index = (config.ftdi_index & 0xFF00) | (channel->cdc_dev_.bulk_interface_number + 1);
       ESP_LOGD(TAG, "Baudrate: %u, value=0x%04X, ftdi_index=0x%04X", (unsigned) channel->baud_rate_, config.value,
                config.ftdi_index);
-      this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x03, config.value, usb_index);
+      uart->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x03, config.value, usb_index);
       return true;
     }
     case 2: {  // set line properties (data bits / parity / stop bits)
@@ -391,14 +390,14 @@ bool USBUartTypeFT23XX::config_step(USBUartChannelBase *channel, uint8_t step, b
           break;
       }
       value |= (0x00 << 14);
-      this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x04, value,
+      uart->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x04, value,
                              channel->cdc_dev_.bulk_interface_number + 1);
       return true;
     }
     case 3:  // set modem control DTR+RTS (init only)
       if (reload)
         return false;
-      this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x01, 0x0000,
+      uart->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x01, 0x0000,
                              channel->cdc_dev_.bulk_interface_number + 1);
       return true;
     default:

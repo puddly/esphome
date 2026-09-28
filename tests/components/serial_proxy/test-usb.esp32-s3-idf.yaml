@@ -19,6 +19,18 @@ usb_host:
     - type: cdc_acm
       vid: 0x303A
       pid: 0x4001
+    - type: cp210x
+      vid: 0x10C4
+      pid: 0xEA60
+    - type: ch34x
+      vid: 0x1A86
+      pid: 0x55D3
+    - type: ft23xx
+      vid: 0x0403
+      pid: 0x6001
+    - type: pl2303
+      vid: 0x067B
+      pid: 0x2303
 
 usb_uart:
   - type: CDC_ACM

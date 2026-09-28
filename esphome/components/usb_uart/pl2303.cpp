@@ -114,7 +114,7 @@ static void encode_baud_divisor_alt(uint8_t buf[4], uint32_t baud) {
   buf[0] = mantissa & 0xFF;
 }
 
-std::vector<CdcEps> USBUartTypePL2303::parse_descriptors(usb_device_handle_t dev_hdl) {
+std::vector<CdcEps> PL2303Driver::parse_descriptors(usb_device_handle_t dev_hdl) {
   const usb_config_desc_t *config_desc;
   const usb_device_desc_t *device_desc;
   std::vector<CdcEps> cdc_devs{};
@@ -135,27 +135,27 @@ std::vector<CdcEps> USBUartTypePL2303::parse_descriptors(usb_device_handle_t dev
   uint8_t bdev_class = device_desc->bDeviceClass;
 
   if (bdev_class == 0x02 || bmax_packet != 0x40) {
-    this->chip_type_ = PL2303_TYPE_H;
+    this->chip_type = PL2303_TYPE_H;
   } else {
     switch (bcd_usb) {
       case 0x0101:
       case 0x0110:
-        this->chip_type_ = (bcd_device == 0x0400) ? PL2303_TYPE_HXD : PL2303_TYPE_HX;
+        this->chip_type = (bcd_device == 0x0400) ? PL2303_TYPE_HXD : PL2303_TYPE_HX;
         break;
       default:
         // TA and TB are distinguishable by bcdDevice without any USB probe.
         if (bcd_device == 0x0300) {
-          this->chip_type_ = PL2303_TYPE_TA;
+          this->chip_type = PL2303_TYPE_TA;
         } else if (bcd_device == 0x0500) {
-          this->chip_type_ = PL2303_TYPE_TB;
+          this->chip_type = PL2303_TYPE_TB;
         } else {
-          this->chip_type_ = PL2303_TYPE_HXN;
+          this->chip_type = PL2303_TYPE_HXN;
         }
         break;
     }
   }
 
-  ESP_LOGI(TAG, "PL2303 chip type: %s (bcdUSB=0x%04X bcdDevice=0x%04X bMaxPkt=%u)", pl2303_type_name(this->chip_type_),
+  ESP_LOGI(TAG, "PL2303 chip type: %s (bcdUSB=0x%04X bcdDevice=0x%04X bMaxPkt=%u)", pl2303_type_name(this->chip_type),
            bcd_usb, bcd_device, bmax_packet);
 
   // PL2303 is single-port: find first interface with 2 bulk endpoints
@@ -227,17 +227,16 @@ static const Pl2303InitStep PL2303_INIT[] = {
 };
 static constexpr uint8_t PL2303_INIT_COUNT = sizeof(PL2303_INIT) / sizeof(PL2303_INIT[0]);
 
-bool USBUartTypePL2303::config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok,
-                                    const uint8_t *response) {
-  bool is_legacy = (this->chip_type_ == PL2303_TYPE_H);
-  bool is_hxn = (this->chip_type_ == PL2303_TYPE_HXN);
+bool PL2303Driver::config_step(USBUartComponent *uart, USBUartChannelBase *channel, uint8_t step, bool reload) const {
+  bool is_legacy = (this->chip_type == PL2303_TYPE_H);
+  bool is_hxn = (this->chip_type == PL2303_TYPE_HXN);
 
   // Vendor init burst runs only on full init for non-HXN chips.
   uint8_t init_count = (!reload && !is_hxn) ? PL2303_INIT_COUNT : 0;
   if (step < init_count) {
     const auto &e = PL2303_INIT[step];
     uint16_t index = (step == PL2303_INIT_COUNT - 1) ? (is_legacy ? 0x24 : 0x44) : e.index;
-    this->config_transfer_(e.type, e.request, e.value, index,
+    uart->config_transfer_(e.type, e.request, e.value, index,
                            e.read ? std::vector<uint8_t>{0} : std::vector<uint8_t>{});
     return true;
   }
@@ -253,9 +252,9 @@ bool USBUartTypePL2303::config_step(USBUartChannelBase *channel, uint8_t step, b
 
       // Choose baud encoding based on chip type
       uint32_t nearest = nearest_supported_baud(baud);
-      if (baud == nearest || this->chip_type_ == PL2303_TYPE_HXN) {
+      if (baud == nearest || this->chip_type == PL2303_TYPE_HXN) {
         encode_baud_direct(line_coding, baud);
-      } else if (this->chip_type_ == PL2303_TYPE_TA || this->chip_type_ == PL2303_TYPE_TB) {
+      } else if (this->chip_type == PL2303_TYPE_TA || this->chip_type == PL2303_TYPE_TB) {
         encode_baud_divisor_alt(line_coding, baud);
       } else {
         encode_baud_divisor(line_coding, baud);
@@ -297,14 +296,14 @@ bool USBUartTypePL2303::config_step(USBUartChannelBase *channel, uint8_t step, b
                line_coding[5], line_coding[6]);
 
       std::vector<uint8_t> lc_vec(line_coding, line_coding + 7);
-      this->config_transfer_(SET_LINE_REQUEST_TYPE, SET_LINE_REQUEST, 0, iface, lc_vec);
+      uart->config_transfer_(SET_LINE_REQUEST_TYPE, SET_LINE_REQUEST, 0, iface, lc_vec);
       return true;
     }
     case 1:
       // Assert DTR + RTS (init only)
       if (reload)
         return false;
-      this->config_transfer_(SET_CONTROL_REQUEST_TYPE, SET_CONTROL_REQUEST, CONTROL_DTR | CONTROL_RTS, iface);
+      uart->config_transfer_(SET_CONTROL_REQUEST_TYPE, SET_CONTROL_REQUEST, CONTROL_DTR | CONTROL_RTS, iface);
       return true;
     default:
       return false;

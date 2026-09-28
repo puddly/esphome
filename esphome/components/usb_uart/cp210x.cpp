@@ -43,7 +43,7 @@ static constexpr uint8_t SET_BAUDRATE = 0x1E;     // Set the baud rate.
 static constexpr uint8_t SET_CHARS = 0x19;        // Set special characters.
 static constexpr uint8_t VENDOR_SPECIFIC = 0xFF;  // Vendor specific command.
 
-std::vector<CdcEps> USBUartTypeCP210X::parse_descriptors(usb_device_handle_t dev_hdl) {
+std::vector<CdcEps> CP210XDriver::parse_descriptors(usb_device_handle_t dev_hdl) {
   const usb_config_desc_t *config_desc;
   const usb_device_desc_t *device_desc;
   int conf_offset = 0, ep_offset;
@@ -97,26 +97,25 @@ std::vector<CdcEps> USBUartTypeCP210X::parse_descriptors(usb_device_handle_t dev
   return cdc_devs;
 }
 
-bool USBUartTypeCP210X::config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok,
-                                    const uint8_t *response) {
+bool CP210XDriver::config_step(USBUartComponent *uart, USBUartChannelBase *channel, uint8_t step, bool reload) {
   // On reload, skip the one-time IFC_ENABLE step (the interface is already enabled).
   if (reload)
     step++;
   switch (step) {
     case 0:
-      this->config_transfer_(USB_VENDOR_IFC | usb_host::USB_DIR_OUT, IFC_ENABLE, 1, channel->index_);
+      uart->config_transfer_(USB_VENDOR_IFC | usb_host::USB_DIR_OUT, IFC_ENABLE, 1, channel->index_);
       return true;
     case 1: {
       uint16_t line_control = channel->stop_bits_;
       line_control |= static_cast<uint8_t>(channel->parity_) << 4;
       line_control |= channel->data_bits_ << 8;
       ESP_LOGD(TAG, "Line control value 0x%X", line_control);
-      this->config_transfer_(USB_VENDOR_IFC | usb_host::USB_DIR_OUT, SET_LINE_CTL, line_control, channel->index_);
+      uart->config_transfer_(USB_VENDOR_IFC | usb_host::USB_DIR_OUT, SET_LINE_CTL, line_control, channel->index_);
       return true;
     }
     case 2: {
       auto baud = ByteBuffer::wrap(channel->baud_rate_, LITTLE);
-      this->config_transfer_(USB_VENDOR_IFC | usb_host::USB_DIR_OUT, SET_BAUDRATE, 0, channel->index_, baud.get_data());
+      uart->config_transfer_(USB_VENDOR_IFC | usb_host::USB_DIR_OUT, SET_BAUDRATE, 0, channel->index_, baud.get_data());
       return true;
     }
     default:

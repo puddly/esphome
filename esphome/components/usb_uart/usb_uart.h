@@ -17,7 +17,10 @@ namespace esphome::usb_uart {
 class USBUartTypeCdcAcm;
 class USBUartComponent;
 class USBUartChannelBase;
-class USBUartTypePL2303;
+struct CP210XDriver;
+struct CH34XDriver;
+struct FT23XXDriver;
+struct PL2303Driver;
 
 static const char *const TAG = "usb_uart";
 
@@ -137,10 +140,10 @@ struct UsbOutputChunk {
 class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartComponent> {
   friend class USBUartComponent;
   friend class USBUartTypeCdcAcm;
-  friend class USBUartTypeCP210X;
-  friend class USBUartTypeCH34X;
-  friend class USBUartTypeFT23XX;
-  friend class USBUartTypePL2303;
+  friend struct CP210XDriver;
+  friend struct CH34XDriver;
+  friend struct FT23XXDriver;
+  friend struct PL2303Driver;
 
  public:
   // Number of output chunk slots per channel, derived from buffer_size config.
@@ -209,6 +212,11 @@ class USBUartChannel final : public USBUartChannelBase {
 };
 
 class USBUartComponent : public usb_host::USBClient {
+  friend struct CP210XDriver;
+  friend struct CH34XDriver;
+  friend struct FT23XXDriver;
+  friend struct PL2303Driver;
+
  public:
   USBUartComponent(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, pid) {}
   void setup() override;
@@ -280,13 +288,18 @@ class USBUartComponent : public usb_host::USBClient {
   bool cfg_ok_{true};
 };
 
+/// Find the CDC ACM functions of a device, standalone or inside a composite device
+std::vector<CdcEps> parse_cdc_acm_descriptors(usb_device_handle_t dev_hdl);
+
 class USBUartTypeCdcAcm : public USBUartComponent {
  public:
   USBUartTypeCdcAcm(uint16_t vid, uint16_t pid) : USBUartComponent(vid, pid) {}
   void set_claim_comm_interface(bool claim) { this->claim_comm_interface_ = claim; }
 
  protected:
-  virtual std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl);
+  virtual std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) {
+    return parse_cdc_acm_descriptors(dev_hdl);
+  }
   void on_connected() override;
   void on_disconnected() override;
   bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override;
@@ -295,42 +308,31 @@ class USBUartTypeCdcAcm : public USBUartComponent {
   bool claim_comm_interface_{true};
 };
 
-class USBUartTypeCP210X : public USBUartTypeCdcAcm {
- public:
-  USBUartTypeCP210X(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+// The vendor drivers hold their logic apart from any one component, so that a device of a
+// fixed type and a dispatcher slot run the same code. Each call takes the component it acts on.
 
- protected:
-  std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
-  bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override;
-};
-class USBUartTypeCH34X : public USBUartTypeCdcAcm {
- public:
-  USBUartTypeCH34X(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
-  void dump_config() override;
-
- protected:
-  bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override;
-  bool config_device_step(uint8_t step, bool ok, const uint8_t *response) override;
-  std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
-
- private:
-  CH34xChipType chiptype_{CHIP_UNKNOWN};
-  const char *chip_name_{"unknown"};
-  uint8_t num_ports_{1};
+struct CP210XDriver {
+  static std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl);
+  static bool config_step(USBUartComponent *uart, USBUartChannelBase *channel, uint8_t step, bool reload);
 };
 
-class USBUartTypeFT23XX : public USBUartTypeCdcAcm {
- public:
-  USBUartTypeFT23XX(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+struct CH34XDriver {
+  static std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl);
+  static bool config_step(USBUartComponent *uart, USBUartChannelBase *channel, uint8_t step);
+  bool config_device_step(USBUartComponent *uart, uint8_t step, bool ok, const uint8_t *response);
 
-  void start_input(USBUartChannelBase *channel) override;
-  void on_rx_overflow(USBUartChannelBase *channel) override;
+  CH34xChipType chiptype{CHIP_UNKNOWN};
+  const char *chip_name{"unknown"};
+  uint8_t num_ports{1};
+};
 
- protected:
-  std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
-  bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override;
+struct FT23XXDriver {
+  std::vector<CdcEps> parse_descriptors(USBUartComponent *uart, usb_device_handle_t dev_hdl);
+  static void start_input(USBUartComponent *uart, USBUartChannelBase *channel);
+  static void on_rx_overflow(USBUartChannelBase *channel);
+  bool config_step(USBUartComponent *uart, USBUartChannelBase *channel, uint8_t step, bool reload) const;
 
-  uint8_t chip_type_{255};
+  uint8_t chip_type{255};
 };
 
 enum Pl2303ChipType : uint8_t {
@@ -343,24 +345,120 @@ enum Pl2303ChipType : uint8_t {
   PL2303_TYPE_UNKNOWN = 0xFF,
 };
 
-class USBUartTypePL2303 : public USBUartTypeCdcAcm {
-  friend class USBUartChannelBase;
+struct PL2303Driver {
+  std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl);
+  bool config_step(USBUartComponent *uart, USBUartChannelBase *channel, uint8_t step, bool reload) const;
 
+  Pl2303ChipType chip_type{PL2303_TYPE_UNKNOWN};
+};
+
+class USBUartTypeCP210X : public USBUartTypeCdcAcm {
+ public:
+  USBUartTypeCP210X(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+
+ protected:
+  std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override {
+    return CP210XDriver::parse_descriptors(dev_hdl);
+  }
+  bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override {
+    return CP210XDriver::config_step(this, channel, step, reload);
+  }
+};
+
+class USBUartTypeCH34X : public USBUartTypeCdcAcm {
+ public:
+  USBUartTypeCH34X(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+  void dump_config() override;
+
+ protected:
+  std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override {
+    return CH34XDriver::parse_descriptors(dev_hdl);
+  }
+  bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override {
+    return CH34XDriver::config_step(this, channel, step);
+  }
+  bool config_device_step(uint8_t step, bool ok, const uint8_t *response) override {
+    return this->driver_.config_device_step(this, step, ok, response);
+  }
+
+ private:
+  CH34XDriver driver_;
+};
+
+class USBUartTypeFT23XX : public USBUartTypeCdcAcm {
+ public:
+  USBUartTypeFT23XX(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+
+  void start_input(USBUartChannelBase *channel) override { FT23XXDriver::start_input(this, channel); }
+  void on_rx_overflow(USBUartChannelBase *channel) override { FT23XXDriver::on_rx_overflow(channel); }
+
+ protected:
+  std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override {
+    return this->driver_.parse_descriptors(this, dev_hdl);
+  }
+  bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override {
+    return this->driver_.config_step(this, channel, step, reload);
+  }
+
+  FT23XXDriver driver_;
+};
+
+class USBUartTypePL2303 : public USBUartTypeCdcAcm {
  public:
   USBUartTypePL2303(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
 
  protected:
-  std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
-  bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override;
+  std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override {
+    return this->driver_.parse_descriptors(dev_hdl);
+  }
+  bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override {
+    return this->driver_.config_step(this, channel, step, reload);
+  }
 
-  Pl2303ChipType chip_type_{PL2303_TYPE_UNKNOWN};
+  PL2303Driver driver_;
 };
 
 #ifdef USB_UART_SLOT_COUNT
-/// One row of the driver table: a CDC ACM device with these IDs
+enum USBUartDriverType : uint8_t {
+  USB_UART_DRIVER_TYPE_CDC_ACM,
+  USB_UART_DRIVER_TYPE_CP210X,
+  USB_UART_DRIVER_TYPE_CH34X,
+  USB_UART_DRIVER_TYPE_FT23XX,
+  USB_UART_DRIVER_TYPE_PL2303,
+};
+
+/// One row of the driver table: the driver to run for a device with these IDs
 struct USBUartDispatchRule {
   uint16_t vid;
   uint16_t pid;
+  USBUartDriverType driver;
+};
+
+/// A slot of the dispatcher's pool. It runs whichever driver the rule that matched its
+/// device names; only the drivers some rule names are compiled in.
+class USBUartDispatchSlot final : public USBUartTypeCdcAcm {
+ public:
+  USBUartDispatchSlot() : USBUartTypeCdcAcm(0, 0) {}
+  /// Set by the dispatcher before the slot is handed a device
+  void set_driver(USBUartDriverType driver) { this->driver_ = driver; }
+  void start_input(USBUartChannelBase *channel) override;
+  void on_rx_overflow(USBUartChannelBase *channel) override;
+
+ protected:
+  std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
+  bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override;
+  bool config_device_step(uint8_t step, bool ok, const uint8_t *response) override;
+
+  USBUartDriverType driver_{USB_UART_DRIVER_TYPE_CDC_ACM};
+#ifdef USE_USB_UART_DRIVER_CH34X
+  CH34XDriver ch34x_;
+#endif
+#ifdef USE_USB_UART_DRIVER_FT23XX
+  FT23XXDriver ft23xx_;
+#endif
+#ifdef USE_USB_UART_DRIVER_PL2303
+  PL2303Driver pl2303_;
+#endif
 };
 
 /// Binds newly enumerated USB devices to a pool of slots the way udev binds a driver: the
@@ -371,12 +469,12 @@ struct USBUartDispatchRule {
 class USBUartDispatcher final : public usb_host::USBDeviceMatcher {
  public:
   void add_rule(const USBUartDispatchRule &rule) { this->rules_.push_back(rule); }
-  void add_slot(USBUartTypeCdcAcm *slot) { this->slots_.push_back(slot); }
+  void add_slot(USBUartDispatchSlot *slot) { this->slots_.push_back(slot); }
   usb_host::USBClient *match(const usb_device_desc_t &desc, const usb_device_info_t &info) override;
 
  protected:
   StaticVector<USBUartDispatchRule, USB_UART_DISPATCH_RULE_COUNT> rules_;
-  StaticVector<USBUartTypeCdcAcm *, USB_UART_SLOT_COUNT> slots_;
+  StaticVector<USBUartDispatchSlot *, USB_UART_SLOT_COUNT> slots_;
 };
 #endif
 

@@ -67,8 +67,8 @@ def get_max_packet_size() -> int:
     return CORE.data.get(DOMAIN, {}).get(CONF_MAX_PACKET_SIZE, 64)
 
 
-# The drivers a rule can name. Only CDC ACM exists so far; a vendor driver adds a value here.
-DRIVER_TYPES = ("CDC_ACM",)
+# The drivers a rule can name, each implemented by usb_uart
+DRIVER_TYPES = ("CDC_ACM", "CP210X", "CH34X", "FT23XX", "PL2303")
 
 # One row of the driver table: the driver to run for a device with these IDs. Rules are tried
 # in order and the first match wins. The line settings come from the client that opens the port.

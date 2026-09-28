@@ -59,7 +59,7 @@ static optional<CdcEps> get_cdc(const usb_config_desc_t *config_desc, uint8_t in
   }
 }
 
-std::vector<CdcEps> USBUartTypeCdcAcm::parse_descriptors(usb_device_handle_t dev_hdl) {
+std::vector<CdcEps> parse_cdc_acm_descriptors(usb_device_handle_t dev_hdl) {
   const usb_config_desc_t *config_desc;
   const usb_device_desc_t *device_desc;
   int desc_offset = 0;
@@ -676,19 +676,93 @@ void USBUartChannelBase::load_settings(bool /*dump_config*/) {
 }
 
 #ifdef USB_UART_SLOT_COUNT
+// A driver no rule names is not compiled in, so its cases fall through to the CDC ACM default
+std::vector<CdcEps> USBUartDispatchSlot::parse_descriptors(usb_device_handle_t dev_hdl) {
+  switch (this->driver_) {
+#ifdef USE_USB_UART_DRIVER_CP210X
+    case USB_UART_DRIVER_TYPE_CP210X:
+      return CP210XDriver::parse_descriptors(dev_hdl);
+#endif
+#ifdef USE_USB_UART_DRIVER_CH34X
+    case USB_UART_DRIVER_TYPE_CH34X:
+      return CH34XDriver::parse_descriptors(dev_hdl);
+#endif
+#ifdef USE_USB_UART_DRIVER_FT23XX
+    case USB_UART_DRIVER_TYPE_FT23XX:
+      return this->ft23xx_.parse_descriptors(this, dev_hdl);
+#endif
+#ifdef USE_USB_UART_DRIVER_PL2303
+    case USB_UART_DRIVER_TYPE_PL2303:
+      return this->pl2303_.parse_descriptors(dev_hdl);
+#endif
+    default:
+      return USBUartTypeCdcAcm::parse_descriptors(dev_hdl);
+  }
+}
+
+bool USBUartDispatchSlot::config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok,
+                                      const uint8_t *response) {
+  switch (this->driver_) {
+#ifdef USE_USB_UART_DRIVER_CP210X
+    case USB_UART_DRIVER_TYPE_CP210X:
+      return CP210XDriver::config_step(this, channel, step, reload);
+#endif
+#ifdef USE_USB_UART_DRIVER_CH34X
+    case USB_UART_DRIVER_TYPE_CH34X:
+      return CH34XDriver::config_step(this, channel, step);
+#endif
+#ifdef USE_USB_UART_DRIVER_FT23XX
+    case USB_UART_DRIVER_TYPE_FT23XX:
+      return this->ft23xx_.config_step(this, channel, step, reload);
+#endif
+#ifdef USE_USB_UART_DRIVER_PL2303
+    case USB_UART_DRIVER_TYPE_PL2303:
+      return this->pl2303_.config_step(this, channel, step, reload);
+#endif
+    default:
+      return USBUartTypeCdcAcm::config_step(channel, step, reload, ok, response);
+  }
+}
+
+bool USBUartDispatchSlot::config_device_step(uint8_t step, bool ok, const uint8_t *response) {
+#ifdef USE_USB_UART_DRIVER_CH34X
+  if (this->driver_ == USB_UART_DRIVER_TYPE_CH34X)
+    return this->ch34x_.config_device_step(this, step, ok, response);
+#endif
+  return false;
+}
+
+void USBUartDispatchSlot::start_input(USBUartChannelBase *channel) {
+#ifdef USE_USB_UART_DRIVER_FT23XX
+  if (this->driver_ == USB_UART_DRIVER_TYPE_FT23XX) {
+    FT23XXDriver::start_input(this, channel);
+    return;
+  }
+#endif
+  USBUartComponent::start_input(channel);
+}
+
+void USBUartDispatchSlot::on_rx_overflow(USBUartChannelBase *channel) {
+#ifdef USE_USB_UART_DRIVER_FT23XX
+  if (this->driver_ == USB_UART_DRIVER_TYPE_FT23XX)
+    FT23XXDriver::on_rx_overflow(channel);
+#endif
+}
+
 usb_host::USBClient *USBUartDispatcher::match(const usb_device_desc_t &desc, const usb_device_info_t & /*info*/) {
-  bool matched = false;
+  const USBUartDispatchRule *matched = nullptr;
   for (const auto &rule : this->rules_) {
     if (desc.idVendor == rule.vid && desc.idProduct == rule.pid) {
-      matched = true;
+      matched = &rule;
       break;
     }
   }
-  if (!matched) {
+  if (matched == nullptr) {
     return nullptr;
   }
   for (auto *slot : this->slots_) {
     if (!slot->is_connected()) {
+      slot->set_driver(matched->driver);
       return slot;
     }
   }
