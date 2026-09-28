@@ -162,6 +162,15 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
   // Re-apply the current line settings (baud, parity, etc) to this already-open channel.
   void load_settings(bool dump_config) override;
   using UARTComponent::load_settings;  // also bring in the no-arg overload for convenience
+  /// Mark a channel whose line settings only ever come from a client (a dispatcher slot's)
+  void set_client_settings_only() { this->client_settings_only_ = true; }
+  /// Forget the line settings the last client applied, when its session ends. A channel with
+  /// settings of its own keeps them; one without then waits for the next client's before it
+  /// sets up a device.
+  void clear_client_settings() {
+    if (this->client_settings_only_)
+      this->baud_rate_ = 0;
+  }
   void set_parity(UARTParityOptions parity) { this->parity_ = parity; }
   void set_debug(bool debug) { this->debug_ = debug; }
   void set_dummy_receiver(bool dummy_receiver) { this->dummy_receiver_ = dummy_receiver; }
@@ -207,6 +216,7 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
   // Whether the full setup has run for the current device. A channel with no line settings
   // yet (a dispatcher slot before a client opens it) waits for them before it runs.
   bool configured_{false};
+  bool client_settings_only_{false};
   const uint8_t index_;
   bool debug_{};
   bool dummy_receiver_{};

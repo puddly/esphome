@@ -77,14 +77,26 @@ void SerialProxy::reset_mode_() {
 }
 #endif
 
+#ifdef USE_API
+void SerialProxy::end_session_() {
+  this->api_connection_ = nullptr;
+  this->reset_mode_();
+#ifdef USE_SERIAL_PROXY_USB_IDENTITY
+  // A USB slot's line settings belong to the session too, so the next device waits for its
+  // own client's instead of running on the departed one's
+  if (this->usb_channel_ != nullptr)
+    this->usb_channel_->clear_client_settings();
+#endif
+}
+#endif
+
 void SerialProxy::loop() {
 #ifdef USE_API
   // Detect subscriber disconnect
   if (this->api_connection_ != nullptr && (this->api_connection_->is_marked_for_removal() ||
                                            !this->api_connection_->is_connection_setup() || !api_is_connected())) {
     ESP_LOGW(TAG, "Subscriber disconnected");
-    this->api_connection_ = nullptr;
-    this->reset_mode_();
+    this->end_session_();
   }
 
   // With no subscriber there is normally nothing to do, but a tap may still need the port
@@ -466,8 +478,7 @@ SerialProxyResult SerialProxy::serial_proxy_request(api::APIConnection *api_conn
         ESP_LOGW(TAG, "Previous subscriber disconnected; taking over subscription");
         // End the dead client's session before starting the new one, so its mode
         // cannot leak into a session that never asked for it
-        this->api_connection_ = nullptr;
-        this->reset_mode_();
+        this->end_session_();
       }
       this->api_connection_ = api_connection;
       this->enable_loop();
@@ -479,8 +490,7 @@ SerialProxyResult SerialProxy::serial_proxy_request(api::APIConnection *api_conn
         ESP_LOGV(TAG, "API connection is not subscribed to serial proxy [%" PRIu32 "]", this->instance_index_);
         return SerialProxyResult::SERIAL_PROXY_RESULT_OK;
       }
-      this->api_connection_ = nullptr;
-      this->reset_mode_();
+      this->end_session_();
 #ifdef USE_SERIAL_PROXY_TAP
       // Keep the loop alive for a tap that still needs the port (mirrors loop())
       if (this->tap_ == nullptr || !this->tap_->tap_needs_port()) {

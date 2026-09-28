@@ -236,6 +236,9 @@ class SerialProxy final : public uart::UARTDevice, public Component {
   /// (write, configure, modem pins, flush, mode) requires this, so an unsubscribed
   /// client can never share the wire with the subscriber or an active tap.
   bool is_subscriber_(api::APIConnection *api_connection) const { return this->api_connection_ == api_connection; }
+
+  /// Drop the subscriber and everything that belongs to its session
+  void end_session_();
 #endif
 
 #ifdef USE_SERIAL_PROXY_TAP

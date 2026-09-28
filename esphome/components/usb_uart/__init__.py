@@ -128,6 +128,7 @@ async def new_dispatch_slot(host_id: ID, config: ConfigType) -> MockObj:
     buffer_size = config[CONF_BUFFER_SIZE]
     channel = cg.new_Pvariable(config[CONF_UART_ID], 0, buffer_size)
     await cg.register_parented(channel, slot)
+    cg.add(channel.set_client_settings_only())
     cg.add(slot.add_channel(channel))
     _request_slot()
     cg.add(data.dispatcher.add_slot(slot))
