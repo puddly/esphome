@@ -199,6 +199,9 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
   std::atomic<bool> input_started_{true};
   std::atomic<bool> output_started_{true};
   std::atomic<bool> initialised_{false};
+  // Whether the full setup has run for the current device. A channel with no line settings
+  // yet (a dispatcher slot before a client opens it) waits for them before it runs.
+  bool configured_{false};
   const uint8_t index_;
   bool debug_{};
   bool dummy_receiver_{};
@@ -252,9 +255,10 @@ class USBUartComponent : public usb_host::USBClient {
   // once from config_step_()/config_device_step_() when issuing a step.
   void config_transfer_(uint8_t type, uint8_t request, uint16_t value, uint16_t index,
                         const std::vector<uint8_t> &data = {});
-  // (Re)start the config state machine. reload=false runs full init over all channels;
-  // reload=true re-applies settings to cfg_single_ only.
-  void start_config_(bool reload);
+  // (Re)start the config state machine. reload=false runs full init, over all channels or
+  // cfg_single_ only; reload=true re-applies settings to cfg_single_ only. The device-level
+  // phase runs only on a full init of the whole device.
+  void start_config_(bool reload, bool device_phase);
   // Advance the config state machine; called from loop(). Returns true if it did work.
   bool run_config_machine_();
 

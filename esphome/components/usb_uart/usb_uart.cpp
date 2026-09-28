@@ -491,6 +491,7 @@ void USBUartTypeCdcAcm::on_disconnected() {
       }
     }
     channel->initialised_.store(false);
+    channel->configured_ = false;
   }
   USBClient::on_disconnected();
 }
@@ -538,7 +539,7 @@ void USBUartComponent::enable_channels() {
   this->cfg_single_ = nullptr;
   this->cfg_pending_reload_ = nullptr;
   this->cfg_channel_idx_ = 0;
-  this->start_config_(false);
+  this->start_config_(false, true);
 }
 
 void USBUartComponent::apply_channel_settings(USBUartChannelBase *channel) {
@@ -552,12 +553,13 @@ void USBUartComponent::apply_channel_settings(USBUartChannelBase *channel) {
     return;
   }
   this->cfg_single_ = channel;
-  this->start_config_(true);
+  // A channel that skipped its setup at attach, for want of line settings, runs it in full now
+  this->start_config_(channel->configured_, false);
 }
 
-void USBUartComponent::start_config_(bool reload) {
+void USBUartComponent::start_config_(bool reload, bool device_phase) {
   this->cfg_reload_ = reload;
-  this->cfg_device_phase_ = !reload;
+  this->cfg_device_phase_ = device_phase;
   this->cfg_step_ = 0;
   this->cfg_ok_ = true;
   this->cfg_in_flight_ = false;
@@ -629,7 +631,9 @@ bool USBUartComponent::run_config_machine_() {
           ? this->cfg_single_
           : (this->cfg_channel_idx_ < this->channels_.size() ? this->channels_[this->cfg_channel_idx_] : nullptr);
 
-  if (channel != nullptr && channel->initialised_.load()) {
+  // Without line settings there is nothing to set up yet; the first load_settings() does it
+  const bool no_settings = channel != nullptr && !this->cfg_reload_ && channel->baud_rate_ == 0;
+  if (channel != nullptr && channel->initialised_.load() && !no_settings) {
     if (!this->cfg_ok_) {
       // A previous step in this channel's sequence failed. Abort the rest. On a full init,
       // mark the channel uninitialised so data flow isn't started on a misconfigured channel;
@@ -643,7 +647,8 @@ bool USBUartComponent::run_config_machine_() {
   }
 
   // Channel finished (or aborted). On full init, kick off data flow if still initialised.
-  if (channel != nullptr && !this->cfg_reload_ && channel->initialised_.load()) {
+  if (channel != nullptr && !this->cfg_reload_ && channel->initialised_.load() && !no_settings) {
+    channel->configured_ = true;
     channel->input_started_.store(false);
     channel->output_started_.store(false);
     this->start_input(channel);
@@ -657,15 +662,16 @@ bool USBUartComponent::run_config_machine_() {
     this->cfg_single_ = nullptr;
   } else if (++this->cfg_channel_idx_ >= this->channels_.size()) {
     this->cfg_active_ = false;
-    // Init is done and the line settings are on the wire: now the device is ready to use
+    // Init is done, so the device is ready to use; a channel still waiting for line settings
+    // is set up when a client applies them
     this->report_connected_();
   }
 
   // If the machine just went idle and a reload was requested while it was busy, start it now.
   if (!this->cfg_active_ && this->cfg_pending_reload_ != nullptr) {
-    this->cfg_single_ = this->cfg_pending_reload_;
+    auto *pending = this->cfg_pending_reload_;
     this->cfg_pending_reload_ = nullptr;
-    this->start_config_(true);
+    this->apply_channel_settings(pending);
   }
   return true;
 }
