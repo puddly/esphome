@@ -35,6 +35,12 @@ class HostUartComponent;
 }  // namespace esphome::uart
 #endif
 
+#ifdef USE_SERIAL_PROXY_IDF_UART
+namespace esphome::uart {
+class IDFUARTComponent;
+}  // namespace esphome::uart
+#endif
+
 // Forward-declare types needed outside the USE_API guard.
 namespace esphome::api {
 class APIConnection;
@@ -196,6 +202,11 @@ class SerialProxy final : public uart::UARTDevice, public Component {
   void set_host_uart(uart::HostUartComponent *host_uart) { this->host_uart_ = host_uart; }
 #endif
 
+#ifdef USE_SERIAL_PROXY_IDF_UART
+  /// Attach the ESP32 hardware UART behind this port (from code generation)
+  void set_idf_uart(uart::IDFUARTComponent *idf_uart) { this->idf_uart_ = idf_uart; }
+#endif
+
 #ifdef USE_API
   /// Send this port's identity to one client
   void send_identity(api::APIConnection *api_connection);
@@ -353,6 +364,11 @@ class SerialProxy final : public uart::UARTDevice, public Component {
 #ifdef USE_SERIAL_PROXY_HOST_UART
   /// The host UART behind this port; nullptr on other ports
   uart::HostUartComponent *host_uart_{nullptr};
+#endif
+
+#ifdef USE_SERIAL_PROXY_IDF_UART
+  /// The ESP32 hardware UART behind this port; nullptr on other ports
+  uart::IDFUARTComponent *idf_uart_{nullptr};
 #endif
 };
 

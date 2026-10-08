@@ -131,6 +131,12 @@ def is_host_uart(uart_id: ID, full_config: ConfigType) -> bool:
     )
 
 
+def is_idf_uart(uart_id: ID, full_config: ConfigType) -> bool:
+    return CORE.is_esp32 and any(
+        conf[CONF_ID] == uart_id for conf in full_config.get(DOMAIN) or []
+    )
+
+
 def validate_raw_data(value):
     if isinstance(value, str):
         return value.encode("utf-8")

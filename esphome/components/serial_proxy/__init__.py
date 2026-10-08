@@ -113,6 +113,10 @@ async def to_code(config: ConfigType) -> None:
         host_uart = await cg.get_variable(config[CONF_UART_ID])
         cg.add(var.set_host_uart(host_uart))
         cg.add_define("USE_SERIAL_PROXY_HOST_UART")
+    if uart.is_idf_uart(config[CONF_UART_ID], CORE.config):
+        idf_uart = await cg.get_variable(config[CONF_UART_ID])
+        cg.add(var.set_idf_uart(idf_uart))
+        cg.add_define("USE_SERIAL_PROXY_IDF_UART")
     cg.add_define("USE_SERIAL_PROXY")
 
     # Track instance count for the FINAL priority define

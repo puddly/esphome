@@ -22,6 +22,10 @@
 #include "esphome/components/uart/uart_component_host.h"
 #endif
 
+#ifdef USE_SERIAL_PROXY_IDF_UART
+#include "esphome/components/uart/uart_component_esp_idf.h"
+#endif
+
 namespace esphome::serial_proxy {
 
 static const char *const TAG = "serial_proxy";
@@ -247,6 +251,15 @@ SerialProxyResult SerialProxy::configure(api::APIConnection *api_connection, uin
 
   uart_comp->set_parity(PARITY_MAP[parity]);
 
+#ifdef USE_SERIAL_PROXY_IDF_UART
+  if (this->idf_uart_ != nullptr) {
+    // Keeps the driver installed; on rejection the previous framing is restored
+    if (this->idf_uart_->apply_settings_live() != ESP_OK) {
+      return SerialProxyResult::SERIAL_PROXY_RESULT_INVALID_ARGUMENT;
+    }
+    return SerialProxyResult::SERIAL_PROXY_RESULT_OK;
+  }
+#endif
   // load_settings() is available on ESP8266 and ESP32 platforms
 #if defined(USE_ESP8266) || defined(USE_ESP32)
   uart_comp->load_settings(true);
