@@ -271,7 +271,7 @@ void USBUartComponent::dump_config() {
                   "    Debug: %s\n"
                   "    Dummy receiver: %s",
                   channel->index_, channel->baud_rate_, channel->data_bits_, PARITY_NAMES[channel->parity_],
-                  STOP_BITS_NAMES[channel->stop_bits_], channel->flush_timeout_ms_, YESNO(channel->debug_),
+                  STOP_BITS_NAMES[channel->stop_bits_code_()], channel->flush_timeout_ms_, YESNO(channel->debug_),
                   YESNO(channel->dummy_receiver_));
   }
 }
@@ -297,7 +297,7 @@ void USBUartComponent::start_input(USBUartChannelBase *channel) {
   const auto *ep = channel->cdc_dev_.in_ep;
   // CALLBACK CONTEXT: This lambda is executed in USB task via transfer_callback
   auto callback = [this, channel](const usb_host::TransferStatus &status) {
-    ESP_LOGV(TAG, "Transfer result: length: %u; status %X", status.data_len, status.error_code);
+    ESP_LOGD(TAG, "@%" PRIu32 " IN done len=%u status=%X", micros(), status.data_len, status.error_code);
     if (!status.success) {
       ESP_LOGE(TAG, "Input transfer failed, status=%s", esp_err_to_name(status.error_code));
       // On failure, don't restart - let next read_array() trigger it
@@ -372,7 +372,7 @@ void USBUartComponent::start_output(USBUartChannelBase *channel) {
     if (!status.success) {
       ESP_LOGW(TAG, "Output transfer failed: status %X", status.error_code);
     } else {
-      ESP_LOGV(TAG, "Output Transfer result: length: %u; status %X", status.data_len, status.error_code);
+      ESP_LOGD(TAG, "@%" PRIu32 " OUT done len=%u", micros(), status.data_len);
     }
     channel->output_pool_.release(chunk);
     channel->output_started_.store(false, std::memory_order_release);
@@ -388,7 +388,7 @@ void USBUartComponent::start_output(USBUartChannelBase *channel) {
     channel->output_started_.store(false, std::memory_order_release);
     return;
   }
-  ESP_LOGV(TAG, "Output %u bytes started", len);
+  ESP_LOGD(TAG, "@%" PRIu32 " OUT submit len=%u", micros(), len);
 }
 
 /**
@@ -514,14 +514,16 @@ bool USBUartTypeCdcAcm::config_step(USBUartChannelBase *channel, uint8_t step, b
       // sends RSTACK.
       uint32_t baud = channel->baud_rate_;
       std::vector<uint8_t> line_coding = {
-          static_cast<uint8_t>(baud & 0xFF),         static_cast<uint8_t>((baud >> 8) & 0xFF),
-          static_cast<uint8_t>((baud >> 16) & 0xFF), static_cast<uint8_t>((baud >> 24) & 0xFF),
-          static_cast<uint8_t>(channel->stop_bits_),  // bCharFormat: 0=1stop, 1=1.5stop, 2=2stop
+          static_cast<uint8_t>(baud & 0xFF),
+          static_cast<uint8_t>((baud >> 8) & 0xFF),
+          static_cast<uint8_t>((baud >> 16) & 0xFF),
+          static_cast<uint8_t>((baud >> 24) & 0xFF),
+          channel->stop_bits_code_(),                 // bCharFormat
           static_cast<uint8_t>(channel->parity_),     // bParityType: 0=None, 1=Odd, 2=Even, 3=Mark, 4=Space
           static_cast<uint8_t>(channel->data_bits_),  // bDataBits
       };
-      ESP_LOGD(TAG, "SET_LINE_CODING: baud=%u stop=%u parity=%u data=%u", (unsigned) baud, channel->stop_bits_,
-               (unsigned) channel->parity_, channel->data_bits_);
+      ESP_LOGD(TAG, "SET_LINE_CODING: baud=%u stop=%s parity=%u data=%u", (unsigned) baud,
+               STOP_BITS_NAMES[channel->stop_bits_code_()], (unsigned) channel->parity_, channel->data_bits_);
       this->config_transfer_(CDC_REQUEST_TYPE, CDC_SET_LINE_CODING, 0, channel->cdc_dev_.interrupt_interface_number,
                              line_coding);
       return true;
@@ -592,11 +594,13 @@ void USBUartComponent::start_config_(ConfigMode mode) {
 void USBUartComponent::config_transfer_(uint8_t type, uint8_t request, uint16_t value, uint16_t index,
                                         const std::vector<uint8_t> &data) {
   this->cfg_done_.store(false);
+  ESP_LOGD(TAG, "@%" PRIu32 " CTRL submit req=0x%02X value=0x%04X", micros(), request, value);
   // The completion callback runs in the USB-task context: it only records the result and
   // wakes the loop. The next transfer is issued from run_config_machine_() on the loop thread.
   bool submitted = this->control_transfer(
       type, request, value, index,
-      [this](const usb_host::TransferStatus &status) {
+      [this, request](const usb_host::TransferStatus &status) {
+        ESP_LOGD(TAG, "@%" PRIu32 " CTRL done req=0x%02X ok=%d", micros(), request, status.success);
         this->cfg_ok_ = status.success;
         if (!status.success) {
           ESP_LOGW(TAG, "Config control transfer failed: %s", esp_err_to_name(status.error_code));
@@ -707,6 +711,17 @@ bool USBUartComponent::run_config_machine_() {
     }
   }
   return true;
+}
+
+uint8_t USBUartChannelBase::stop_bits_code_() const {
+  switch (this->stop_bits_) {
+    case UART_CONFIG_STOP_BITS_1_5:
+      return 1;
+    case UART_CONFIG_STOP_BITS_2:
+      return 2;
+    default:
+      return 0;
+  }
 }
 
 void USBUartChannelBase::load_settings(bool /*dump_config*/) {
