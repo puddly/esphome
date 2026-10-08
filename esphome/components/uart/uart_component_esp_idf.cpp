@@ -65,6 +65,21 @@ static const LogString *clock_source_to_str(uart_sclk_t clock_source) {
   }
 }
 
+esp_err_t IDFUARTComponent::param_config_(const uart_config_t &uart_config) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C2)
+  // UART_CLKDIV is a synchronous register: written on APB, consumed in the UART core
+  // clock domain. These chips run in auto-sync mode, which the register description
+  // only guarantees while the core clock equals APB. The IDF HAL writes CLKDIV and
+  // then the prescaler, so when the previous rate left the core clock prescaled down
+  // the CLKDIV sync can be lost when the prescaler snaps the clock back, leaving the
+  // old divider live at the new prescaler (e.g. 300 -> 115200 ends up at 19.8 kbaud).
+  // Dropping the prescaler first makes the CLKDIV write sync at full clock; the
+  // prescaler is an immediate register, so its later write cannot be lost.
+  HAL_FORCE_MODIFY_U32_REG_FIELD(UART_LL_GET_HW(this->uart_num_)->clk_conf, sclk_div_num, 0);
+#endif
+  return uart_param_config(this->uart_num_, &uart_config);
+}
+
 uart_config_t IDFUARTComponent::get_config_() {
   uart_parity_t parity = UART_PARITY_DISABLE;
   if (this->parity_ == UART_CONFIG_PARITY_EVEN) {
@@ -182,7 +197,7 @@ void IDFUARTComponent::load_settings(bool dump_config) {
   // settings are applied after the reset and before pin routing, inversion, and
   // threshold configuration.
   uart_config_t uart_config = this->get_config_();
-  err = uart_param_config(this->uart_num_, &uart_config);
+  err = this->param_config_(uart_config);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "uart_param_config failed: %s", esp_err_to_name(err));
     this->mark_failed();
@@ -316,7 +331,7 @@ esp_err_t IDFUARTComponent::apply_settings_live() {
   }
   // Keeps the driver ring buffers; flushes both hardware FIFOs (in-flight bytes lost).
   uart_config_t uart_config = this->get_config_();
-  esp_err_t err = uart_param_config(this->uart_num_, &uart_config);
+  esp_err_t err = this->param_config_(uart_config);
   if (err != ESP_OK) {
     // Failure leaves the registers reset; put back the last accepted framing so the
     // getters still describe the hardware.
@@ -329,7 +344,7 @@ esp_err_t IDFUARTComponent::apply_settings_live() {
              this->last_good_framing_.baud_rate);
     this->set_framing_(this->last_good_framing_);
     uart_config = this->get_config_();
-    esp_err_t restore_err = uart_param_config(this->uart_num_, &uart_config);
+    esp_err_t restore_err = this->param_config_(uart_config);
     if (restore_err != ESP_OK) {
       ESP_LOGE(TAG, "UART left unconfigured after failed live reconfigure: %s", esp_err_to_name(restore_err));
       this->mark_failed();

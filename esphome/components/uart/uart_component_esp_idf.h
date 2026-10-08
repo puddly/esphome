@@ -93,6 +93,8 @@ class IDFUARTComponent final : public UARTComponent, public Component {
   uint32_t line_inversion_mask_();
   // Re-applies what uart_param_config() resets: inversion, RX threshold/timeout, mode.
   esp_err_t apply_line_settings_();
+  // uart_param_config() with the core clock prescaler cleared first (see the definition).
+  esp_err_t param_config_(const uart_config_t &uart_config);
   uart_port_t uart_num_{UART_NUM_MAX};
   uart_config_t get_config_();
 
