@@ -8,3 +8,15 @@ serial_proxy:
   - id: serial_proxy_1
     name: Test Serial Port
     port_type: RS232
+    # A CP2102 cloned from its descriptors: a vendor-specific interface, so its port is numbered
+    identity:
+      manufacturer: Silicon Labs
+      product: CP2102 USB to UART Bridge Controller
+      serial_number: !lambda return str_upper_case(get_mac_address());
+      vid: 0x10C4
+      pid: 0xEA60
+      bcd_device: 0x0100
+      interface_number: 0
+      interface_class: 0xFF
+      port_number: 0
+      interface_description: CP2102 USB to UART Bridge Controller

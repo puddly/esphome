@@ -20,6 +20,10 @@
 #include "esphome/components/api/api_pb2.h"
 #endif
 
+#ifdef USE_SERIAL_PROXY_CONFIGURED_IDENTITY
+#include "esphome/core/automation.h"
+#endif
+
 #ifdef USE_SERIAL_PROXY_USB_IDENTITY
 namespace esphome::usb_uart {
 class USBUartChannel;
@@ -196,6 +200,29 @@ class SerialProxy final : public uart::UARTDevice, public Component {
   void set_host_uart(uart::HostUartComponent *host_uart) { this->host_uart_ = host_uart; }
 #endif
 
+#ifdef USE_SERIAL_PROXY_CONFIGURED_IDENTITY
+  /// Set the identity stated in YAML (from code generation). A lambda runs once, in setup()
+  void set_identity_manufacturer(TemplatableValue<std::string> value) {
+    this->identity_manufacturer_ = std::move(value);
+  }
+  void set_identity_product(TemplatableValue<std::string> value) { this->identity_product_ = std::move(value); }
+  void set_identity_serial_number(TemplatableValue<std::string> value) {
+    this->identity_serial_number_ = std::move(value);
+  }
+  void set_identity_interface_description(const char *value) { this->identity_interface_description_ = value; }
+  /// Always called for a configured identity, so it also marks the port as having one
+  void set_identity_usb(uint16_t vendor_id, uint16_t product_id, uint16_t bcd_device, uint8_t interface_number,
+                        uint8_t interface_class, uint8_t port_number) {
+    this->has_identity_ = true;
+    this->identity_usb_vendor_id_ = vendor_id;
+    this->identity_usb_product_id_ = product_id;
+    this->identity_usb_bcd_device_ = bcd_device;
+    this->identity_usb_interface_number_ = interface_number;
+    this->identity_usb_interface_class_ = interface_class;
+    this->identity_usb_port_number_ = port_number;
+  }
+#endif
+
 #ifdef USE_API
   /// Send this port's identity to one client
   void send_identity(api::APIConnection *api_connection);
@@ -291,8 +318,8 @@ class SerialProxy final : public uart::UARTDevice, public Component {
 #else
   struct IdentityScratch {};
 #endif
-  /// Fill an identity message for this port. The message's strings are views into scratch,
-  /// so it must outlive the send.
+  /// Fill an identity message for this port. The message's strings are views into scratch
+  /// or into this object, so both must outlive the send.
   void fill_identity_(IdentityScratch &scratch, api::SerialProxyIdentity &msg) const;
 #endif
 
@@ -348,6 +375,21 @@ class SerialProxy final : public uart::UARTDevice, public Component {
 #ifdef USE_SERIAL_PROXY_USB_IDENTITY
   /// The USB UART channel behind this port; nullptr on non-USB ports
   usb_uart::USBUartChannel *usb_channel_{nullptr};
+#endif
+
+#ifdef USE_SERIAL_PROXY_CONFIGURED_IDENTITY
+  /// Identity stated in YAML. After setup() each holds a plain string, never a lambda
+  TemplatableValue<std::string> identity_manufacturer_;
+  TemplatableValue<std::string> identity_product_;
+  TemplatableValue<std::string> identity_serial_number_;
+  const char *identity_interface_description_{""};
+  uint16_t identity_usb_vendor_id_{0};
+  uint16_t identity_usb_product_id_{0};
+  uint16_t identity_usb_bcd_device_{0};
+  uint8_t identity_usb_interface_number_{0};
+  uint8_t identity_usb_interface_class_{0};
+  uint8_t identity_usb_port_number_{0};
+  bool has_identity_{false};
 #endif
 
 #ifdef USE_SERIAL_PROXY_HOST_UART
